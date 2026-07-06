@@ -1218,8 +1218,12 @@ class NPUPlatform(Platform):
 
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
                 logger.warning(
-                    "[DBO_DEBUG] config: enable_dbo=True use_ubatching=%s "
-                    "num_ubatches=%s dbo_decode_token_threshold=%s "
+                    "[DBO_EXPERIMENTAL] enable_dbo is preserved on Ascend "
+                    "for the initial CCF PoC/RFC path. This only enables "
+                    "DBO scheduling and metadata bring-up; multi-NPU MoE "
+                    "communication overlap is not verified yet. "
+                    "use_ubatching=%s num_ubatches=%s "
+                    "dbo_decode_token_threshold=%s "
                     "dbo_prefill_token_threshold=%s dp_size=%s ep=%s",
                     getattr(vllm_config.parallel_config, "use_ubatching", None),
                     getattr(vllm_config.parallel_config, "num_ubatches", None),

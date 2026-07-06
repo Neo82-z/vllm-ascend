@@ -295,6 +295,8 @@ class NPUModelRunner(GPUModelRunner):
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
+        self._dbo_single_dp_notice_logged = False
+
         # Replace the CUDA PrefetchOffloader set by parent __init__ with NPU version.
         offload_cfg = vllm_config.offload_config
         if (offload_cfg is not None
@@ -2162,9 +2164,11 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded,
                     self.parallel_config.num_ubatches,
                 )
-                if self.parallel_config.enable_dbo or ubatch_slices is not None:
-                    logger.warning(
-                        "[DBO_DEBUG] execute slices: should_ubatch=%s "
+                if logger.isEnabledFor(logging.DEBUG) and (
+                    self.parallel_config.enable_dbo or ubatch_slices is not None
+                ):
+                    logger.debug(
+                        "[DBO_EXPERIMENTAL] execute slices: should_ubatch=%s "
                         "num_scheduled_tokens=%s num_tokens_padded=%s "
                         "num_reqs_padded=%s ubatch_slices=%s "
                         "ubatch_slices_padded=%s",
@@ -3007,9 +3011,9 @@ class NPUModelRunner(GPUModelRunner):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
                 "Sequence parallelism requires num_tokens to be a multiple of tensor parallel size"
             )
-        if self.parallel_config.enable_dbo:
-            logger.warning(
-                "[DBO_DEBUG] determine: enable_dbo=True use_ubatching=%s "
+        if logger.isEnabledFor(logging.DEBUG) and self.parallel_config.enable_dbo:
+            logger.debug(
+                "[DBO_EXPERIMENTAL] determine: enable_dbo=True use_ubatching=%s "
                 "num_ubatches=%s dp_size=%s num_tokens=%s "
                 "num_tokens_padded=%s num_reqs=%s "
                 "max_num_scheduled_tokens=%s uniform_decode=%s "
@@ -3045,9 +3049,9 @@ class NPUModelRunner(GPUModelRunner):
                     cudagraph_mode=cudagraph_mode,
                     allow_dp_padding=(cudagraph_mode != CUDAGraphMode.NONE) or enable_sp(self.vllm_config),
                 )
-            if self.parallel_config.enable_dbo:
-                logger.warning(
-                    "[DBO_DEBUG] coordinate: should_ubatch=%s "
+            if logger.isEnabledFor(logging.DEBUG) and self.parallel_config.enable_dbo:
+                logger.debug(
+                    "[DBO_EXPERIMENTAL] coordinate: should_ubatch=%s "
                     "num_tokens_across_dp=%s synced_cudagraph_mode=%s",
                     should_ubatch,
                     _format_dbo_tensor(num_tokens_across_dp),
@@ -3066,12 +3070,16 @@ class NPUModelRunner(GPUModelRunner):
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
-        elif self.parallel_config.enable_dbo:
-            logger.warning(
-                "[DBO_DEBUG] coordinate skipped: dp_size=%s should_ubatch=%s",
+        elif self.parallel_config.enable_dbo and not self._dbo_single_dp_notice_logged:
+            logger.info(
+                "[DBO_EXPERIMENTAL] DBO coordination is skipped because "
+                "data_parallel_size=%s. Single-NPU runs only validate the "
+                "configuration and scheduling path; real DBO overlap requires "
+                "a multi-NPU DP/EP MoE setup. should_ubatch=%s",
                 self.parallel_config.data_parallel_size,
                 should_ubatch,
             )
+            self._dbo_single_dp_notice_logged = True
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
             cudagraph_stats = CUDAGraphStat(
@@ -3574,9 +3582,11 @@ class NPUModelRunner(GPUModelRunner):
             ubatch_slices,
             ubatch_slices_padded,
         )
-        if self.parallel_config.enable_dbo or ubatch_slices is not None:
-            logger.warning(
-                "[DBO_DEBUG] dummy slices: should_ubatch=%s "
+        if logger.isEnabledFor(logging.DEBUG) and (
+            self.parallel_config.enable_dbo or ubatch_slices is not None
+        ):
+            logger.debug(
+                "[DBO_EXPERIMENTAL] dummy slices: should_ubatch=%s "
                 "num_scheduled_tokens=%s num_tokens_padded=%s "
                 "num_reqs_padded=%s ubatch_slices=%s "
                 "ubatch_slices_padded=%s",

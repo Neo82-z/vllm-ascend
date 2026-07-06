@@ -459,8 +459,8 @@ class NPUWorker(WorkerBase):
         # Initialize workspace manager. DBO uses two active ubatch slots.
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         if self.vllm_config.parallel_config.enable_dbo:
-            logger.warning(
-                "[DBO_DEBUG] workspace: device=%s enable_dbo=True "
+            logger.info(
+                "[DBO_EXPERIMENTAL] workspace: device=%s enable_dbo=True "
                 "use_ubatching=%s num_ubatches=%s dp_size=%s",
                 self.device,
                 self.vllm_config.parallel_config.use_ubatching,
