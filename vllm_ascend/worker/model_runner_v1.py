@@ -101,6 +101,7 @@ from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
+    check_ubatch_thresholds,
     maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
@@ -3011,13 +3012,23 @@ class NPUModelRunner(GPUModelRunner):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
                 "Sequence parallelism requires num_tokens to be a multiple of tensor parallel size"
             )
+        dbo_threshold_met = (
+            allow_microbatching
+            and check_ubatch_thresholds(
+                self.parallel_config,
+                num_tokens,
+                uniform_decode=uniform_decode,
+            )
+        )
         if logger.isEnabledFor(logging.DEBUG) and self.parallel_config.enable_dbo:
             logger.debug(
                 "[DBO_EXPERIMENTAL] determine: enable_dbo=True use_ubatching=%s "
                 "num_ubatches=%s dp_size=%s num_tokens=%s "
                 "num_tokens_padded=%s num_reqs=%s "
                 "max_num_scheduled_tokens=%s uniform_decode=%s "
-                "allow_microbatching=%s cudagraph_mode=%s batch_desc=%s",
+                "allow_microbatching=%s dbo_decode_token_threshold=%s "
+                "dbo_prefill_token_threshold=%s dbo_threshold_met=%s "
+                "cudagraph_mode=%s batch_desc=%s",
                 self.parallel_config.use_ubatching,
                 self.parallel_config.num_ubatches,
                 self.parallel_config.data_parallel_size,
@@ -3027,6 +3038,9 @@ class NPUModelRunner(GPUModelRunner):
                 max_num_scheduled_tokens,
                 uniform_decode,
                 allow_microbatching,
+                self.parallel_config.dbo_decode_token_threshold,
+                self.parallel_config.dbo_prefill_token_threshold,
+                dbo_threshold_met,
                 cudagraph_mode,
                 batch_descriptor,
             )

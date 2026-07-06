@@ -8,6 +8,10 @@ vLLM-Ascend DBO parameters:
 - `--enable-dbo`
 - `--dbo-decode-token-threshold`
 
+It also keeps `--dbo-prefill-token-threshold` on the same experimental path,
+because vLLM's DBO trigger logic selects between the decode and prefill
+thresholds from the same `check_ubatch_thresholds` flow.
+
 The code in this branch should be treated as an experimental PoC / RFC rather
 than a merge-ready production change. It records an initial Ascend DBO bring-up
 path and the engineering issues discovered while aligning vLLM-Ascend with the
@@ -33,6 +37,9 @@ into separate follow-up work before any formal upstream merge request.
 The PoC focuses on the first scheduling and metadata path needed by DBO:
 
 - Preserve `parallel_config.enable_dbo` on Ascend instead of forcing it off.
+- Preserve both DBO token thresholds so decode-only batches use
+  `dbo_decode_token_threshold` and mixed/prefill batches use
+  `dbo_prefill_token_threshold`.
 - Allocate two ubatch workspaces when `enable_dbo` is set.
 - Create ubatch slices through vLLM's `maybe_create_ubatch_slices` helper.
 - Route DP metadata through the DBO-aware coordination path when DP and

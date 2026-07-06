@@ -30,6 +30,8 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config = MagicMock()
         mock_vllm_config.parallel_config.enable_dbo = False
         mock_vllm_config.parallel_config.ubatch_size = 0
+        mock_vllm_config.parallel_config.dbo_decode_token_threshold = 32
+        mock_vllm_config.parallel_config.dbo_prefill_token_threshold = 512
         mock_vllm_config.parallel_config.data_parallel_size = 1
         mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.parallel_config.tensor_parallel_size = 1
@@ -199,6 +201,17 @@ class TestNPUPlatform(TestBase):
         self.platform._fix_incompatible_config(vllm_config)
 
         self.assertTrue(vllm_config.parallel_config.enable_dbo)
+
+    def test_fix_incompatible_config_preserves_dbo_thresholds(self):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.enable_dbo = True
+        vllm_config.parallel_config.dbo_decode_token_threshold = 7
+        vllm_config.parallel_config.dbo_prefill_token_threshold = 19
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertEqual(vllm_config.parallel_config.dbo_decode_token_threshold, 7)
+        self.assertEqual(vllm_config.parallel_config.dbo_prefill_token_threshold, 19)
 
     @patch("vllm_ascend.platform.refresh_block_size")
     @patch("vllm_ascend.platform.get_ascend_device_type", return_value=AscendDeviceType.A3)
