@@ -2906,6 +2906,20 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
+    def _check_dbo_ubatch_thresholds(
+        self,
+        num_tokens: int,
+        uniform_decode: bool,
+        allow_microbatching: bool,
+    ) -> bool:
+        if not allow_microbatching:
+            return False
+        return check_ubatch_thresholds(
+            self.parallel_config,
+            num_tokens,
+            uniform_decode=uniform_decode,
+        )
+
     # These functions from upstream vllm handle PP+SP. Ascend's flashcomm1 SP
     # differs from vllm's native SP: flashcomm1 does NOT scatter the residual
     # before PP send, so the all_gather in sync_and_gather_intermediate_tensors
@@ -3012,13 +3026,10 @@ class NPUModelRunner(GPUModelRunner):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
                 "Sequence parallelism requires num_tokens to be a multiple of tensor parallel size"
             )
-        dbo_threshold_met = (
-            allow_microbatching
-            and check_ubatch_thresholds(
-                self.parallel_config,
-                num_tokens,
-                uniform_decode=uniform_decode,
-            )
+        dbo_threshold_met = self._check_dbo_ubatch_thresholds(
+            num_tokens,
+            uniform_decode,
+            allow_microbatching,
         )
         if logger.isEnabledFor(logging.DEBUG) and self.parallel_config.enable_dbo:
             logger.debug(
@@ -3049,6 +3060,10 @@ class NPUModelRunner(GPUModelRunner):
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             if allow_microbatching and self.parallel_config.use_ubatching:
+                # All DP ranks must enter the same collective even if this
+                # local rank is below its DBO threshold. The helper syncs the
+                # per-rank threshold result and only enables ubatching when all
+                # ranks agree, avoiding divergent collective order.
                 should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
                     parallel_config=self.parallel_config,

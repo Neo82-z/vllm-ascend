@@ -40,6 +40,9 @@ The PoC focuses on the first scheduling and metadata path needed by DBO:
 - Preserve both DBO token thresholds so decode-only batches use
   `dbo_decode_token_threshold` and mixed/prefill batches use
   `dbo_prefill_token_threshold`.
+- Use the selected threshold as the DBO ubatch trigger. DP ranks still enter the
+  same DBO-aware coordination collective, and ubatching is enabled only after
+  ranks synchronize their threshold decisions.
 - Allocate two ubatch workspaces when `enable_dbo` is set.
 - Create ubatch slices through vLLM's `maybe_create_ubatch_slices` helper.
 - Route DP metadata through the DBO-aware coordination path when DP and
