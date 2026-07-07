@@ -20,6 +20,11 @@ from dataclasses import dataclass
 
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.v1.worker.ubatching import (
+    dbo_enabled,
+    dbo_switch_to_compute_sync,
+    dbo_yield_and_switch_from_compute_to_comm,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -144,7 +149,19 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
             topk_ids=routed_topk_ids,
         )
-        token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        use_dbo_dispatch_stream = dbo_enabled()
+        if use_dbo_dispatch_stream:
+            # Experimental Ascend DBO path: let the paired ubatch enqueue its
+            # compute work before this ubatch starts communication, then run
+            # dispatch on the ubatch communication stream.
+            dbo_yield_and_switch_from_compute_to_comm()
+        try:
+            token_dispatch_output = self.token_dispatcher.token_dispatch(
+                token_dispatch_input=token_dispatch_input
+            )
+        finally:
+            if use_dbo_dispatch_stream:
+                dbo_switch_to_compute_sync()
 
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
@@ -155,10 +172,20 @@ class MoECommMethod(ABC):
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
         before_combine_evt = torch.npu.current_stream().record_event()
-        routed_out = self.token_dispatcher.token_combine(
-            hidden_states=mlp_output,
-            combine_metadata=token_dispatch_output.combine_metadata,
-        )
+        use_dbo_combine_stream = dbo_enabled()
+        if use_dbo_combine_stream:
+            # Combine is also communication-heavy; route it through the same
+            # ubatch stream handoff so compute and communication have a clear
+            # ordering boundary on NPU.
+            dbo_yield_and_switch_from_compute_to_comm()
+        try:
+            routed_out = self.token_dispatcher.token_combine(
+                hidden_states=mlp_output,
+                combine_metadata=token_dispatch_output.combine_metadata,
+            )
+        finally:
+            if use_dbo_combine_stream:
+                dbo_switch_to_compute_sync()
 
         return FusedExpertsResult(
             routed_out=routed_out,

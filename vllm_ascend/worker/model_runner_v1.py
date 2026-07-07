@@ -160,6 +160,7 @@ from vllm_ascend.utils import (
     should_skip_allreduce_across_dp_group,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.npu_ubatch_wrapper import NPUUBatchWrapper
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
@@ -728,8 +729,8 @@ class NPUModelRunner(GPUModelRunner):
         return max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode
 
     def get_model(self) -> nn.Module:
-        # get raw model out of the aclgraph wrapper.
-        if isinstance(self.model, ACLGraphWrapper):
+        # get raw model out of the graph/ubatch wrapper.
+        if isinstance(self.model, (ACLGraphWrapper, NPUUBatchWrapper)):
             return self.model.unwrap()
         return self.model
 
@@ -2335,6 +2336,7 @@ class NPUModelRunner(GPUModelRunner):
                 skip_compiled=has_encoder_input,
                 has_sinks=self._has_sinks,
                 input_ids=input_ids,
+                ubatch_slices=ubatch_slices_padded,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ),
             self.maybe_get_kv_connector_output(
@@ -3783,6 +3785,7 @@ class NPUModelRunner(GPUModelRunner):
                 model_instance=self.model,
                 has_sinks = self._has_sinks,
                 input_ids=input_ids,
+                ubatch_slices=ubatch_slices_padded,
                 eplb_heat_collection_status=self.eplb_heat_collection_status if self.dynamic_eplb else False,
             ):
                 outputs = self._model_forward(
@@ -3952,8 +3955,25 @@ class NPUModelRunner(GPUModelRunner):
         from vllm.model_executor.offloader.base import get_offloader
         get_offloader().post_init()
 
-        # wrap the model with full graph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        # wrap the model with full graph / ubatch wrapper if needed.
+        if self.parallel_config.use_ubatching:
+            runtime_mode = (
+                CUDAGraphMode.FULL
+                if self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+                else CUDAGraphMode.NONE
+            )
+            self.model = NPUUBatchWrapper(
+                self.model,
+                self.vllm_config,
+                runtime_mode=runtime_mode,
+                device=self.device,
+            )
+            logger.info(
+                "[DBO_EXPERIMENTAL] Wrapped model with NPUUBatchWrapper "
+                "(runtime_mode=%s)",
+                runtime_mode,
+            )
+        elif self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(
                 self.model,

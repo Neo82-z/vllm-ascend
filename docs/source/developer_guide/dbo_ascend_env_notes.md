@@ -50,13 +50,18 @@ The PoC focuses on the first scheduling and metadata path needed by DBO:
   matching the upstream vLLM model runner behavior.
 - Allocate two ubatch workspaces when `enable_dbo` is set.
 - Create ubatch slices through vLLM's `maybe_create_ubatch_slices` helper.
+- Forward ubatch slices through Ascend's forward context and wrap the model with
+  an experimental NPU ubatch wrapper so the scheduled slices reach execution.
+- Add experimental DBO stream handoff points around Ascend MoE dispatch/combine
+  so MC2/All2All paths have an initial communication boundary to validate.
 - Route DP metadata through the DBO-aware coordination path when DP and
   ubatching are both active.
 - Add focused debug logging around DBO decision points and ubatch slices.
 - Add unit coverage for config preservation and the DP coordination call path.
 
 This is not a complete Ascend DBO implementation. In particular, it does not
-claim proven communication-compute overlap for MoE workloads.
+claim proven communication-compute overlap for MoE workloads. Ubatched ACLGraph
+capture/replay is also intentionally left disabled in the PoC path.
 
 ### Verified Locally
 
