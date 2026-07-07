@@ -426,6 +426,7 @@ def test_determine_batch_execution_uses_dbo_dp_coordination(model_runner):
     assert should_ubatch is True
     assert num_tokens_across_dp is None
     mock_coordinate.assert_called_once()
+    assert mock_coordinate.call_args.kwargs["allow_microbatching"] is True
 
 
 def test_determine_batch_execution_dbo_below_threshold_still_coordinates_dp(model_runner):
@@ -460,6 +461,7 @@ def test_determine_batch_execution_dbo_below_threshold_still_coordinates_dp(mode
     assert should_ubatch is False
     assert num_tokens_across_dp is None
     mock_coordinate.assert_called_once()
+    assert mock_coordinate.call_args.kwargs["allow_microbatching"] is False
 
 
 def test_determine_batch_execution_dbo_single_dp_does_not_ubatch(model_runner):

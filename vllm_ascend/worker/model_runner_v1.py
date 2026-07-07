@@ -2906,7 +2906,7 @@ class NPUModelRunner(GPUModelRunner):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
-    def _check_dbo_ubatch_thresholds(
+    def _should_attempt_dbo_ubatching(
         self,
         num_tokens: int,
         uniform_decode: bool,
@@ -2918,6 +2918,28 @@ class NPUModelRunner(GPUModelRunner):
             self.parallel_config,
             num_tokens,
             uniform_decode=uniform_decode,
+        )
+
+    def _coordinate_dbo_batch_across_dp(
+        self,
+        *,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+        uniform_decode: bool,
+        cudagraph_mode: CUDAGraphMode,
+        should_attempt_ubatching: bool,
+    ) -> tuple[bool, torch.Tensor | None, int]:
+        # All DP ranks must enter the same collective. The local threshold
+        # decision is passed as the ubatch-attempt flag and synchronized inside
+        # coordinate_batch_across_dp, so a below-threshold rank disables ubatch
+        # globally without diverging collective order.
+        return coordinate_batch_across_dp(
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.parallel_config,
+            allow_microbatching=should_attempt_ubatching,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=uniform_decode,
+            cudagraph_mode=cudagraph_mode.value,
         )
 
     # These functions from upstream vllm handle PP+SP. Ascend's flashcomm1 SP
@@ -3026,7 +3048,7 @@ class NPUModelRunner(GPUModelRunner):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
                 "Sequence parallelism requires num_tokens to be a multiple of tensor parallel size"
             )
-        dbo_threshold_met = self._check_dbo_ubatch_thresholds(
+        should_attempt_dbo_ubatching = self._should_attempt_dbo_ubatching(
             num_tokens,
             uniform_decode,
             allow_microbatching,
@@ -3038,7 +3060,8 @@ class NPUModelRunner(GPUModelRunner):
                 "num_tokens_padded=%s num_reqs=%s "
                 "max_num_scheduled_tokens=%s uniform_decode=%s "
                 "allow_microbatching=%s dbo_decode_token_threshold=%s "
-                "dbo_prefill_token_threshold=%s dbo_threshold_met=%s "
+                "dbo_prefill_token_threshold=%s "
+                "should_attempt_dbo_ubatching=%s "
                 "cudagraph_mode=%s batch_desc=%s",
                 self.parallel_config.use_ubatching,
                 self.parallel_config.num_ubatches,
@@ -3051,7 +3074,7 @@ class NPUModelRunner(GPUModelRunner):
                 allow_microbatching,
                 self.parallel_config.dbo_decode_token_threshold,
                 self.parallel_config.dbo_prefill_token_threshold,
-                dbo_threshold_met,
+                should_attempt_dbo_ubatching,
                 cudagraph_mode,
                 batch_descriptor,
             )
@@ -3060,17 +3083,12 @@ class NPUModelRunner(GPUModelRunner):
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
             if allow_microbatching and self.parallel_config.use_ubatching:
-                # All DP ranks must enter the same collective even if this
-                # local rank is below its DBO threshold. The helper syncs the
-                # per-rank threshold result and only enables ubatching when all
-                # ranks agree, avoiding divergent collective order.
-                should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = coordinate_batch_across_dp(
+                should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = self._coordinate_dbo_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
-                    parallel_config=self.parallel_config,
-                    allow_microbatching=allow_microbatching,
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
-                    cudagraph_mode=cudagraph_mode.value,
+                    cudagraph_mode=cudagraph_mode,
+                    should_attempt_ubatching=should_attempt_dbo_ubatching,
                 )
             else:
                 _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
