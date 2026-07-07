@@ -268,3 +268,66 @@ class TestMoECommMethod(TestBase):
             hidden_states=mock_unified_apply_mlp.return_value[0],
             combine_metadata=mock_td_instance.token_dispatch.return_value.combine_metadata,
         )
+
+    def test_fused_experts_uses_dbo_stream_handoff_when_enabled(self):
+        with (
+            patch("vllm_ascend.ascend_forward_context.get_forward_context") as mock_get_forward_context,
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.PrepareAndFinalizeWithAllGather"),
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.TokenDispatcherWithAllGather") as mock_token_dispatcher,
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.unified_apply_mlp") as mock_unified_apply_mlp,
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.dbo_enabled", return_value=True),
+            patch(
+                "vllm_ascend.ops.fused_moe.moe_comm_method.dbo_yield_and_switch_from_compute_to_comm"
+            ) as mock_yield_to_comm,
+            patch("vllm_ascend.ops.fused_moe.moe_comm_method.dbo_switch_to_compute_sync") as mock_switch_to_compute,
+            patch("torch.npu.current_stream") as mock_current_stream,
+        ):
+            mock_context = MagicMock()
+            mock_context.moe_comm_method = "all_gather"
+            mock_get_forward_context.return_value = mock_context
+            mock_current_stream.return_value.record_event.return_value = MagicMock()
+
+            mock_td_instance = MagicMock()
+            dispatch_topk_weights = torch.tensor([[0.5, 0.5], [0.3, 0.7]])
+            mock_td_instance.token_dispatch.return_value = MoETokenDispatchOutput(
+                hidden_states=torch.randn(4, 8),
+                group_list=torch.tensor([2, 2]),
+                group_list_type=1,
+                combine_metadata=MoEAllGatherCombineMetadata(
+                    topk_weights=dispatch_topk_weights,
+                    expanded_row_idx=torch.arange(4, dtype=torch.int32),
+                    restore_shape=torch.Size([2, 8]),
+                ),
+            )
+            mock_td_instance.token_combine.return_value = torch.randn(2, 8)
+            mock_token_dispatcher.return_value = mock_td_instance
+            mock_unified_apply_mlp.return_value = (torch.randn(4, 8), MagicMock())
+
+            comm_impl = AllGatherCommImpl(self.moe_config)
+            result = comm_impl.fused_experts(
+                fused_experts_input=MoEFusedExpertsInput(
+                    hidden_states=torch.randn(2, 8).contiguous(),
+                    topk_weights=dispatch_topk_weights,
+                    topk_ids=torch.tensor([[0, 1], [1, 2]]),
+                    weights=MoEWeights(
+                        w1=[torch.randn(16, 8).contiguous()],
+                        w2=[torch.randn(16, 8).contiguous()],
+                    ),
+                    routing=MoERoutingParams(
+                        expert_map=None,
+                        global_redundant_expert_num=0,
+                        mc2_mask=None,
+                        apply_router_weight_on_input=False,
+                    ),
+                    activation="silu",
+                    need_trans=False,
+                    dynamic_eplb=False,
+                    quant=MoEQuantParams(),
+                )
+            )
+
+            self.assertEqual(result.routed_out.shape, (2, 8))
+            self.assertEqual(mock_yield_to_comm.call_count, 2)
+            self.assertEqual(mock_switch_to_compute.call_count, 2)
+            mock_td_instance.token_dispatch.assert_called_once()
+            mock_td_instance.token_combine.assert_called_once()
