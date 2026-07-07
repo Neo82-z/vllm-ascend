@@ -46,6 +46,8 @@ The PoC focuses on the first scheduling and metadata path needed by DBO:
 - Pass the local threshold result into the DP coordination helper as the
   `allow_microbatching` signal, so decode/prefill thresholds affect the runtime
   ubatch decision instead of only appearing in debug logs.
+- Disable cascade attention whenever `parallel_config.use_ubatching` is active,
+  matching the upstream vLLM model runner behavior.
 - Allocate two ubatch workspaces when `enable_dbo` is set.
 - Create ubatch slices through vLLM's `maybe_create_ubatch_slices` helper.
 - Route DP metadata through the DBO-aware coordination path when DP and

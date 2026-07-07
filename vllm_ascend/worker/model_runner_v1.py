@@ -2121,8 +2121,8 @@ class NPUModelRunner(GPUModelRunner):
                 if self.pcp_size > 1:
                     num_tokens_unpadded = self.pcp_manager.total_num_sampled_tokens_pcp
                 cascade_attn_prefix_lens = None
-                # Disable cascade attention when using microbatching (DBO)
-                if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
+                # Disable cascade attention when using microbatching (DBO/manual ubatch).
+                if self.cascade_attn_enabled and not self.parallel_config.use_ubatching:
                     # Pre-compute cascade attention prefix lengths
                     cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
                         num_scheduled_tokens_np,
