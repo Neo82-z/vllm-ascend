@@ -10,6 +10,7 @@ from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import get_dp_group, get_ep_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import BatchDescriptor, get_forward_context, set_forward_context
 from vllm.logger import logger
+from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import (
@@ -71,6 +72,8 @@ def set_ascend_forward_context(
     draft_attn_metadatas=None,
     has_sinks=False,
     input_ids=None,
+    ubatch_slices: UBatchSlices | None = None,
+    slot_mapping=None,
     eplb_heat_collection_status: bool = False,
 ):
     """A context manager that stores the current forward context,
@@ -85,6 +88,8 @@ def set_ascend_forward_context(
         "cudagraph_runtime_mode": aclgraph_runtime_mode,
         "batch_descriptor": batch_descriptor,
         "skip_compiled": skip_compiled,
+        "ubatch_slices": ubatch_slices,
+        "slot_mapping": slot_mapping,
     }
     with set_forward_context(**forward_context_kwargs):
         forward_context = get_forward_context()
