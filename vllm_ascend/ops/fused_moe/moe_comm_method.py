@@ -20,6 +20,11 @@ from dataclasses import dataclass
 
 import torch
 from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+from vllm.v1.worker.ubatching import (
+    dbo_enabled,
+    dbo_switch_to_compute_sync,
+    dbo_yield_and_switch_from_compute_to_comm,
+)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import _EXTRA_CTX, MoECommType
@@ -87,6 +92,8 @@ class FusedExpertsResult:
 class MoECommMethod(ABC):
     """Base class for MoE communication methods."""
 
+    supports_dbo_stream_handoff = False
+
     def __init__(self, moe_config: FusedMoEConfig):
         self.moe_config = moe_config
 
@@ -145,7 +152,7 @@ class MoECommMethod(ABC):
             fused_experts_input=fused_experts_input,
             topk_ids=routed_topk_ids,
         )
-        token_dispatch_output = self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        token_dispatch_output = self._token_dispatch_with_optional_dbo_handoff(token_dispatch_input)
 
         mlp_compute_input = build_mlp_compute_input(
             fused_experts_input=fused_experts_input,
@@ -156,7 +163,7 @@ class MoECommMethod(ABC):
         mlp_output, before_gmm2_evt = self._apply_mlp(mlp_compute_input)
 
         before_combine_evt = torch.npu.current_stream().record_event()
-        routed_out = self.token_dispatcher.token_combine(
+        routed_out = self._token_combine_with_optional_dbo_handoff(
             hidden_states=mlp_output,
             combine_metadata=token_dispatch_output.combine_metadata,
         )
@@ -173,6 +180,32 @@ class MoECommMethod(ABC):
 
     def _apply_mlp(self, mlp_compute_input: MoEMlpComputeInput) -> torch.Tensor:
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
+
+    def _should_use_dbo_stream_handoff(self) -> bool:
+        return self.supports_dbo_stream_handoff and dbo_enabled()
+
+    def _token_dispatch_with_optional_dbo_handoff(self, token_dispatch_input):
+        use_dbo_handoff = self._should_use_dbo_stream_handoff()
+        if use_dbo_handoff:
+            dbo_yield_and_switch_from_compute_to_comm()
+        try:
+            return self.token_dispatcher.token_dispatch(token_dispatch_input=token_dispatch_input)
+        finally:
+            if use_dbo_handoff:
+                dbo_switch_to_compute_sync()
+
+    def _token_combine_with_optional_dbo_handoff(self, hidden_states, combine_metadata):
+        use_dbo_handoff = self._should_use_dbo_stream_handoff()
+        if use_dbo_handoff:
+            dbo_yield_and_switch_from_compute_to_comm()
+        try:
+            return self.token_dispatcher.token_combine(
+                hidden_states=hidden_states,
+                combine_metadata=combine_metadata,
+            )
+        finally:
+            if use_dbo_handoff:
+                dbo_switch_to_compute_sync()
 
     @abstractmethod
     def _get_token_dispatcher(self) -> MoETokenDispatcher:
@@ -201,6 +234,8 @@ class AllGatherCommImpl(MoECommMethod):
     use `torch_npu.npu_moe_token_unpermute` instead.
     This is a workaround and should be removed after the issue is fixed.
     """
+
+    supports_dbo_stream_handoff = True
 
     def _get_token_dispatcher(self):
         return TokenDispatcherWithAllGather(
