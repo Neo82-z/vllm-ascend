@@ -1188,10 +1188,38 @@ class NPUPlatform(Platform):
                 vllm_config.parallel_config.numa_bind_cpus = None
 
             if getattr(vllm_config.parallel_config, "enable_dbo", False):
-                logger.warning(
-                    "Parameter is currently ignored on Ascend. parameter=enable_dbo, action: resetting to False. "
-                )
-                vllm_config.parallel_config.enable_dbo = False
+                dbo_unsupported_reasons = []
+                if getattr(vllm_config.parallel_config, "prefill_context_parallel_size", 1) > 1:
+                    dbo_unsupported_reasons.append("prefill_context_parallel_size > 1")
+                if getattr(vllm_config.parallel_config, "decode_context_parallel_size", 1) > 1:
+                    dbo_unsupported_reasons.append("decode_context_parallel_size > 1")
+                if getattr(vllm_config.parallel_config, "context_parallel_size", 1) > 1:
+                    dbo_unsupported_reasons.append("context_parallel_size > 1")
+                if enable_sp(vllm_config):
+                    dbo_unsupported_reasons.append("sequence parallelism")
+
+                if dbo_unsupported_reasons:
+                    logger.warning(
+                        "DBO is currently unsupported with %s on Ascend NPU. "
+                        "parameter=enable_dbo, action: resetting to False.",
+                        ", ".join(dbo_unsupported_reasons),
+                    )
+                    vllm_config.parallel_config.enable_dbo = False
+                else:
+                    logger.warning(
+                        "[DBO_EXPERIMENTAL] enable_dbo is preserved on Ascend "
+                        "for the initial scheduling path. This does not claim "
+                        "multi-NPU MoE communication overlap yet. "
+                        "use_ubatching=%s num_ubatches=%s "
+                        "dbo_decode_token_threshold=%s "
+                        "dbo_prefill_token_threshold=%s dp_size=%s ep=%s",
+                        getattr(vllm_config.parallel_config, "use_ubatching", None),
+                        getattr(vllm_config.parallel_config, "num_ubatches", None),
+                        getattr(vllm_config.parallel_config, "dbo_decode_token_threshold", None),
+                        getattr(vllm_config.parallel_config, "dbo_prefill_token_threshold", None),
+                        getattr(vllm_config.parallel_config, "data_parallel_size", None),
+                        getattr(vllm_config.parallel_config, "enable_expert_parallel", None),
+                    )
 
             ubatch_size = getattr(vllm_config.parallel_config, "ubatch_size", 0)
             if ubatch_size != 0:

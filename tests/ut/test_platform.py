@@ -29,6 +29,13 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.device_config.device_type = "npu"
         mock_vllm_config.parallel_config = MagicMock()
         mock_vllm_config.parallel_config.data_parallel_size = 1
+        mock_vllm_config.parallel_config.enable_dbo = False
+        mock_vllm_config.parallel_config.ubatch_size = 0
+        mock_vllm_config.parallel_config.dbo_decode_token_threshold = 32
+        mock_vllm_config.parallel_config.dbo_prefill_token_threshold = 512
+        mock_vllm_config.parallel_config.use_ubatching = False
+        mock_vllm_config.parallel_config.num_ubatches = 1
+        mock_vllm_config.parallel_config.enable_expert_parallel = False
         mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.parallel_config.tensor_parallel_size = 1
         mock_vllm_config.parallel_config.pipeline_parallel_size = 1
@@ -723,6 +730,63 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(vllm_config.cache_config.block_size, 512)
 
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    def test_fix_incompatible_config_preserves_enable_dbo(self, _mock_enable_sp):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.enable_dbo = True
+        vllm_config.parallel_config.use_ubatching = True
+        vllm_config.parallel_config.num_ubatches = 2
+        vllm_config.parallel_config.enable_expert_parallel = True
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertTrue(vllm_config.parallel_config.enable_dbo)
+        self.assertEqual(vllm_config.parallel_config.dbo_decode_token_threshold, 32)
+        self.assertEqual(vllm_config.parallel_config.dbo_prefill_token_threshold, 512)
+
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    def test_fix_incompatible_config_resets_ubatch_size(self, _mock_enable_sp):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.ubatch_size = 128
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertEqual(vllm_config.parallel_config.ubatch_size, 0)
+
+    @pytest.mark.parametrize(
+        "parallel_attr",
+        [
+            "prefill_context_parallel_size",
+            "decode_context_parallel_size",
+            "context_parallel_size",
+        ],
+    )
+    @patch("vllm_ascend.platform.enable_sp", return_value=False)
+    def test_fix_incompatible_config_resets_dbo_for_context_parallelism(
+        self,
+        _mock_enable_sp,
+        parallel_attr,
+    ):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.enable_dbo = True
+        setattr(vllm_config.parallel_config, parallel_attr, 2)
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertFalse(vllm_config.parallel_config.enable_dbo)
+
+    @patch("vllm_ascend.platform.enable_sp", return_value=True)
+    def test_fix_incompatible_config_resets_dbo_for_sequence_parallelism(
+        self,
+        _mock_enable_sp,
+    ):
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.enable_dbo = True
+
+        self.platform._fix_incompatible_config(vllm_config)
+
+        self.assertFalse(vllm_config.parallel_config.enable_dbo)
+
     def test_validate_layer_sharding_config_rejects_missing_kv_transfer_config(self):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.additional_config = {"layer_sharding": ["q_b_proj", "o_proj"]}
@@ -759,7 +823,7 @@ class TestNPUPlatform(TestBase):
         vllm_config.parallel_config.data_parallel_size = 2
         vllm_config.parallel_config.prefill_context_parallel_size = 2
 
-        with pytest.raises(ValueError, match="PCP \(Prefill Context Parallelism\) and DP \(Data Parallelism\)"):
+        with pytest.raises(ValueError, match=r"PCP \(Prefill Context Parallelism\) and DP \(Data Parallelism\)"):
             self.platform._validate_parallel_config(vllm_config)
 
     def test_validate_parallel_config_accepts_dp_only(self):
