@@ -215,7 +215,7 @@ class NPUWorker(WorkerBase):
                     if os.path.exists(lock_file_path):
                         os.remove(lock_file_path)
                 except Exception:
-                    return
+                    pass
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.npu.mem_get_info()[0]
@@ -511,8 +511,8 @@ class NPUWorker(WorkerBase):
         # in ray scenario. see https://github.com/vllm-project/vllm/pull/26845
         # for more details
         self.device = self._init_device()
-        # Initialize workspace manager
-        num_ubatches = 1
+        # Initialize workspace manager. DBO uses two active ubatch slots.
+        num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
         init_workspace_manager(self.device, num_ubatches)
         # Init ModelRunner here, so that we have access to self.device.
         if self.use_v2_model_runner:

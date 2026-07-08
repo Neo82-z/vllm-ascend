@@ -165,6 +165,7 @@ from vllm_ascend.utils import (
     vllm_version_is,
 )
 from vllm_ascend.worker.npu_input_batch import NPUInputBatch
+from vllm_ascend.worker.npu_ubatch_wrapper import NPUUBatchWrapper
 from vllm_ascend.worker.pcp_utils import PCPManager
 from vllm_ascend.worker.utils import AscendKVBlockZeroer
 
@@ -717,8 +718,8 @@ class NPUModelRunner(GPUModelRunner):
         return max_tokens_across_dp, num_tokens_after_padding, synced_cudagraph_mode
 
     def get_model(self) -> nn.Module:
-        # get raw model out of the aclgraph wrapper.
-        if isinstance(self.model, ACLGraphWrapper):
+        # get raw model out of graph/ubatch wrappers.
+        if isinstance(self.model, (ACLGraphWrapper, NPUUBatchWrapper)):
             return self.model.unwrap()
         return self.model
 
@@ -3980,8 +3981,21 @@ class NPUModelRunner(GPUModelRunner):
             and mm_config.is_multimodal_pruning_enabled()
         ) # type: bool
         
-        # wrap the model with full graph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        # Wrap the model for ubatching before ACLGraph. Ascend DBO currently
+        # validates the eager ubatch path; ACLGraph capture/replay remains a
+        # separate follow-up.
+        if self.parallel_config.use_ubatching:
+            self.model = NPUUBatchWrapper(
+                self.model,
+                self.vllm_config,
+                runtime_mode=CUDAGraphMode.NONE,
+                device=self.device,
+            )
+            logger.warning(
+                "[DBO_EXPERIMENTAL] Wrapped model with NPUUBatchWrapper. "
+                "ACLGraph capture is disabled for ubatched execution."
+            )
+        elif self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.update_stream: torch.npu.Stream = torch.npu.Stream()
             self.model = ACLGraphWrapper(
                 self.model,
