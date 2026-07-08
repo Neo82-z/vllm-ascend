@@ -95,9 +95,11 @@ from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     get_total_cp_world_size,
 )
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
+    check_ubatch_thresholds,
     maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
@@ -3045,6 +3047,39 @@ class NPUModelRunner(GPUModelRunner):
             num_tokens, intermediate_tensors, sync_self
         )
 
+    def _should_attempt_dbo_ubatching(
+        self,
+        num_tokens: int,
+        uniform_decode: bool,
+        allow_microbatching: bool,
+    ) -> bool:
+        if not allow_microbatching:
+            return False
+        return check_ubatch_thresholds(
+            self.parallel_config,
+            num_tokens,
+            uniform_decode=uniform_decode,
+        )
+
+    def _coordinate_dbo_batch_across_dp(
+        self,
+        *,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+        uniform_decode: bool,
+        cudagraph_mode: CUDAGraphMode,
+        should_attempt_ubatching: bool,
+    ) -> tuple[bool, torch.Tensor | None, CUDAGraphMode]:
+        should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = coordinate_batch_across_dp(
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.parallel_config,
+            allow_microbatching=should_attempt_ubatching,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=uniform_decode,
+            cudagraph_mode=cudagraph_mode.value,
+        )
+        return should_ubatch, num_tokens_across_dp, CUDAGraphMode(synced_cudagraph_mode)
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -3052,7 +3087,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_np: np.ndarray,
         max_num_scheduled_tokens: int,
         use_cascade_attn: bool,
-        allow_microbatching: bool = False,
+        allow_microbatching: bool = True,
         force_eager: bool = False,
         # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
         # be improved in model runner v2)
@@ -3102,18 +3137,51 @@ class NPUModelRunner(GPUModelRunner):
             assert batch_descriptor.num_tokens % self.vllm_config.parallel_config.tensor_parallel_size == 0, (
                 "Sequence parallelism requires num_tokens to be a multiple of tensor parallel size"
             )
+        should_attempt_dbo_ubatching = self._should_attempt_dbo_ubatching(
+            num_tokens,
+            uniform_decode,
+            allow_microbatching,
+        )
+        if logger.isEnabledFor(logging.DEBUG) and self.parallel_config.enable_dbo:
+            logger.debug(
+                "[DBO_EXPERIMENTAL] determine: use_ubatching=%s "
+                "num_ubatches=%s dp_size=%s num_tokens=%s "
+                "num_tokens_padded=%s num_reqs=%s uniform_decode=%s "
+                "allow_microbatching=%s dbo_decode_token_threshold=%s "
+                "dbo_prefill_token_threshold=%s should_attempt_ubatching=%s",
+                self.parallel_config.use_ubatching,
+                self.parallel_config.num_ubatches,
+                self.parallel_config.data_parallel_size,
+                num_tokens,
+                num_tokens_padded,
+                num_reqs,
+                uniform_decode,
+                allow_microbatching,
+                self.parallel_config.dbo_decode_token_threshold,
+                self.parallel_config.dbo_prefill_token_threshold,
+                should_attempt_dbo_ubatching,
+            )
         # Extra coordination when running data-parallel since we need to coordinate
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
-                num_tokens=num_tokens_padded,
-                cudagraph_mode=cudagraph_mode,
-                allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
-                                  or enable_sp(self.vllm_config)
-                                  or oproj_tp_enable()
-                                  or embedding_tp_enable()),
-            )
+            if allow_microbatching and self.parallel_config.use_ubatching:
+                should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = self._coordinate_dbo_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    num_tokens_padded=num_tokens_padded,
+                    uniform_decode=uniform_decode,
+                    cudagraph_mode=cudagraph_mode,
+                    should_attempt_ubatching=should_attempt_dbo_ubatching,
+                )
+            else:
+                _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
+                    num_tokens=num_tokens_padded,
+                    cudagraph_mode=cudagraph_mode,
+                    allow_dp_padding=((cudagraph_mode != CUDAGraphMode.NONE)
+                                      or enable_sp(self.vllm_config)
+                                      or oproj_tp_enable()
+                                      or embedding_tp_enable()),
+                )
 
             # Extract DP padding if there is any
             if num_tokens_across_dp is not None:

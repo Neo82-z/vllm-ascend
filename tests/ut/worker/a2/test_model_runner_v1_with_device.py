@@ -21,6 +21,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
 )
+from vllm.v1.worker.ubatch_utils import check_ubatch_thresholds
 
 import vllm_ascend.compilation.acl_graph as acl_graph
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -391,3 +392,182 @@ def test_determine_batch_execution_and_padding(
     finally:
         runner.speculative_config = saved_spec_config
         runner.uniform_decode_query_len = saved_query_len
+
+
+def test_determine_batch_execution_uses_dbo_dp_coordination(model_runner):
+    runner = model_runner
+    runner.parallel_config.data_parallel_size = 2
+    runner.parallel_config.data_parallel_rank = 0
+    runner.parallel_config.enable_dbo = True
+    runner.parallel_config.dbo_decode_token_threshold = 4
+    runner.input_batch.num_computed_tokens_cpu[:4] = [1, 1, 1, 1]
+    num_scheduled_tokens_np = np.array([1, 1, 1, 1], dtype=np.int32)
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.coordinate_batch_across_dp",
+        return_value=(True, np.array([4, 4], dtype=np.int32), CUDAGraphMode.NONE.value),
+    ) as mock_coordinate:
+        (
+            _cudagraph_mode,
+            _batch_desc,
+            should_ubatch,
+            _num_tokens_across_dp,
+            _cudagraph_stats,
+        ) = runner._determine_batch_execution_and_padding(
+            num_tokens=4,
+            num_reqs=4,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=1,
+            use_cascade_attn=False,
+            force_eager=True,
+        )
+
+    mock_coordinate.assert_called_once()
+    assert mock_coordinate.call_args.kwargs["allow_microbatching"] is True
+    assert should_ubatch is True
+
+
+def test_determine_batch_execution_dbo_below_threshold_still_coordinates_dp(
+    model_runner,
+):
+    runner = model_runner
+    runner.parallel_config.data_parallel_size = 2
+    runner.parallel_config.data_parallel_rank = 0
+    runner.parallel_config.enable_dbo = True
+    runner.parallel_config.dbo_decode_token_threshold = 8
+    runner.input_batch.num_computed_tokens_cpu[:4] = [1, 1, 1, 1]
+    num_scheduled_tokens_np = np.array([1, 1, 1, 1], dtype=np.int32)
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.coordinate_batch_across_dp",
+        return_value=(False, np.array([4, 4], dtype=np.int32), CUDAGraphMode.NONE.value),
+    ) as mock_coordinate:
+        (
+            _cudagraph_mode,
+            _batch_desc,
+            should_ubatch,
+            _num_tokens_across_dp,
+            _cudagraph_stats,
+        ) = runner._determine_batch_execution_and_padding(
+            num_tokens=4,
+            num_reqs=4,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=1,
+            use_cascade_attn=False,
+            force_eager=True,
+        )
+
+    mock_coordinate.assert_called_once()
+    assert mock_coordinate.call_args.kwargs["allow_microbatching"] is False
+    assert should_ubatch is False
+
+
+def test_determine_batch_execution_dbo_single_dp_does_not_ubatch(model_runner):
+    runner = model_runner
+    runner.parallel_config.data_parallel_size = 1
+    runner.parallel_config.enable_dbo = True
+    runner.parallel_config.dbo_decode_token_threshold = 1
+    runner.input_batch.num_computed_tokens_cpu[:4] = [1, 1, 1, 1]
+    num_scheduled_tokens_np = np.array([1, 1, 1, 1], dtype=np.int32)
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.coordinate_batch_across_dp"
+    ) as mock_coordinate:
+        (
+            _cudagraph_mode,
+            _batch_desc,
+            should_ubatch,
+            num_tokens_across_dp,
+            _cudagraph_stats,
+        ) = runner._determine_batch_execution_and_padding(
+            num_tokens=4,
+            num_reqs=4,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=1,
+            use_cascade_attn=False,
+            force_eager=True,
+        )
+
+    mock_coordinate.assert_not_called()
+    assert should_ubatch is False
+    assert num_tokens_across_dp is None
+
+
+@pytest.mark.parametrize(
+    (
+        "num_computed_tokens",
+        "num_scheduled_tokens",
+        "num_tokens",
+        "num_reqs",
+        "max_num_scheduled_tokens",
+        "decode_threshold",
+        "prefill_threshold",
+        "expected_uniform_decode",
+    ),
+    [
+        pytest.param(
+            [1, 1, 1, 1],
+            [1, 1, 1, 1],
+            4,
+            4,
+            1,
+            4,
+            999,
+            True,
+            id="decode_threshold",
+        ),
+        pytest.param(
+            [0, 0],
+            [5, 5],
+            10,
+            2,
+            5,
+            999,
+            10,
+            False,
+            id="prefill_threshold",
+        ),
+    ],
+)
+def test_determine_batch_execution_checks_dbo_threshold_mode(
+    model_runner,
+    num_computed_tokens,
+    num_scheduled_tokens,
+    num_tokens,
+    num_reqs,
+    max_num_scheduled_tokens,
+    decode_threshold,
+    prefill_threshold,
+    expected_uniform_decode,
+):
+    runner = model_runner
+    runner.parallel_config.data_parallel_size = 1
+    runner.parallel_config.enable_dbo = True
+    runner.parallel_config.dbo_decode_token_threshold = decode_threshold
+    runner.parallel_config.dbo_prefill_token_threshold = prefill_threshold
+    runner.input_batch.num_computed_tokens_cpu[:num_reqs] = num_computed_tokens
+    num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.check_ubatch_thresholds",
+        wraps=check_ubatch_thresholds,
+    ) as mock_check:
+        runner._determine_batch_execution_and_padding(
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            use_cascade_attn=False,
+            force_eager=True,
+        )
+
+    mock_check.assert_called_once()
+    called_config, called_num_tokens = mock_check.call_args.args
+    assert called_config is runner.parallel_config
+    assert called_num_tokens == num_tokens
+    assert mock_check.call_args.kwargs["uniform_decode"] is expected_uniform_decode
+    assert check_ubatch_thresholds(
+        runner.parallel_config,
+        num_tokens,
+        uniform_decode=expected_uniform_decode,
+    )
