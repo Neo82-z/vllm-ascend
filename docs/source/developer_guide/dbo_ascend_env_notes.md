@@ -21,6 +21,8 @@ current vLLM main branch.
 
 - Submission branch: `ccf/dbo-submission-20260706`
 - Original DBO PoC branch: `feature/dbo-ascend`
+- Current submission branch head:
+  `96ec22bb8a662f1c562a3cc9694e80217181d5a2`
 - DBO PoC commit: `b79df9afe57b2849bb31a72669578ca2583beaea`
 - DBO PoC commit title: `Enable initial DBO path on Ascend`
 - Upstream vLLM-Ascend main observed on 2026-07-06:
@@ -31,6 +33,31 @@ for this contest archive. Upstream moved substantially during the bring-up
 period, and rebasing the PoC directly mixes DBO scheduling work with unrelated
 main-branch compatibility fixes. Those compatibility issues should be split
 into separate follow-up work before any formal upstream merge request.
+
+### Submission Commit Map
+
+The submission branch keeps the DBO work as a small sequence of reviewable
+commits:
+
+- `b79df9afe57b2849bb31a72669578ca2583beaea`: initial `--enable-dbo`
+  preservation and first Ascend scheduling path.
+- `469a42ab0b86f0bc19609dee46b9b0bba2e11aa3`: CCF submission and
+  environment notes.
+- `50bdcdf7922c2e4673ed05b9899664dfda09d5d7`: mark the Ascend DBO path as
+  experimental instead of production-ready.
+- `0f09f5553a5bacc320c2cc02c6d45b21c22a8442`: unit coverage for DBO
+  parameter preservation and threshold selection.
+- `e583c3030f5f42d41a0c7d8071a4fca6a2ca69e4`: route
+  `--dbo-decode-token-threshold` and `--dbo-prefill-token-threshold` through
+  the runtime ubatch trigger.
+- `3f40b2983fe540df8ff8b81697c469c414ef7911`: pass the local DBO threshold
+  result into DP batch coordination.
+- `f01b25260dda966579b014a72c1655c4c655decf`: align cascade attention
+  disabling with the generic ubatching condition.
+- `a1679af121946252404b03909ad92d8ed482a025`: add the experimental NPU
+  ubatch execution wrapper and MoE communication stream handoff points.
+- `96ec22bb8a662f1c562a3cc9694e80217181d5a2`: add focused tests for forward
+  context state, NPU ubatch slicing, and MoE DBO stream handoff.
 
 ### Implemented PoC Behavior
 
@@ -57,11 +84,45 @@ The PoC focuses on the first scheduling and metadata path needed by DBO:
 - Route DP metadata through the DBO-aware coordination path when DP and
   ubatching are both active.
 - Add focused debug logging around DBO decision points and ubatch slices.
-- Add unit coverage for config preservation and the DP coordination call path.
+- Add unit coverage for config preservation, decode/prefill threshold
+  selection, DP coordination, forward-context ubatch state propagation, NPU
+  ubatch input slicing, and MoE DBO stream handoff.
 
 This is not a complete Ascend DBO implementation. In particular, it does not
 claim proven communication-compute overlap for MoE workloads. Ubatched ACLGraph
 capture/replay is also intentionally left disabled in the PoC path.
+
+### Local Static Checks
+
+The following checks were run locally before archiving the branch head at
+`96ec22bb8a662f1c562a3cc9694e80217181d5a2`:
+
+```bash
+git diff --check
+python3 -m py_compile \
+  tests/ut/test_ascend_forward_context.py \
+  tests/ut/ops/test_moe_comm_method.py \
+  tests/ut/worker/test_npu_ubatch_wrapper.py \
+  vllm_ascend/worker/npu_ubatch_wrapper.py \
+  vllm_ascend/ops/fused_moe/moe_comm_method.py \
+  vllm_ascend/ascend_forward_context.py
+tools/check_logger.sh \
+  tests/ut/test_ascend_forward_context.py \
+  tests/ut/ops/test_moe_comm_method.py \
+  tests/ut/worker/test_npu_ubatch_wrapper.py \
+  vllm_ascend/worker/npu_ubatch_wrapper.py \
+  vllm_ascend/ops/fused_moe/moe_comm_method.py
+python3 tools/check_boolean_context_manager.py \
+  tests/ut/test_ascend_forward_context.py \
+  tests/ut/ops/test_moe_comm_method.py \
+  tests/ut/worker/test_npu_ubatch_wrapper.py \
+  vllm_ascend/worker/npu_ubatch_wrapper.py \
+  vllm_ascend/ops/fused_moe/moe_comm_method.py
+```
+
+Full `pytest` and hardware execution were intentionally left for the Ascend
+server environment because the local machine does not provide the required NPU
+runtime.
 
 ### Verified Locally
 
