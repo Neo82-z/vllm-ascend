@@ -92,6 +92,27 @@ This is not a complete Ascend DBO implementation. In particular, it does not
 claim proven communication-compute overlap for MoE workloads. Ubatched ACLGraph
 capture/replay is also intentionally left disabled in the PoC path.
 
+### Decode and Prefill Threshold Semantics
+
+The PoC follows the current vLLM `check_ubatch_thresholds` semantics:
+
+- If `parallel_config.use_ubatching` is false, DBO does not attempt ubatching.
+- If the scheduled batch is a uniform decode batch, the trigger is
+  `num_tokens >= dbo_decode_token_threshold`.
+- Otherwise, the trigger is
+  `num_tokens >= dbo_prefill_token_threshold`.
+- In current vLLM main, the default decode threshold is `32`, and the default
+  prefill threshold is `512`.
+- `parallel_config.use_ubatching` is true when either `enable_dbo` is true or
+  manual `ubatch_size > 1`.
+- With `enable_dbo`, `parallel_config.num_ubatches` resolves to `2`.
+
+In this Ascend PoC, the local threshold result is not used to skip DP metadata
+synchronization. Instead, it is passed into the DBO-aware DP coordination path
+as `allow_microbatching`. This keeps collective ordering aligned across DP
+ranks while still allowing a below-threshold rank to disable ubatching for the
+whole synchronized batch.
+
 ### Local Static Checks
 
 The following checks were run locally before archiving the branch head at
