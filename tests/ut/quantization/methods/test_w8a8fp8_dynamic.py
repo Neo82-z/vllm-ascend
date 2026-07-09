@@ -66,7 +66,7 @@ class TestAscendW8A8FP8DynamicLinearMethod(TestBase):
 
         self.assertEqual(layer.weight.shape, (2048, 768))
         self.assertEqual(layer.weight_scale.shape, (6, 16))
-        self.assertTrue(torch.equal(layer.weight_scale, torch.full((6, 16), 0.5, dtype=torch.float32)))
+        self.assertTrue(torch.equal(layer.weight_scale, torch.full((6, 16), 2.0, dtype=torch.float32)))
 
 
 class TestAscendW8A8FP8FusedMoEMethod(TestBase):
@@ -156,8 +156,8 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
         self.assertEqual(layer.w2_weight.shape, (2, 128, 128))
         self.assertEqual(layer.w13_weight_scale.shape, (2, 1, 2))
         self.assertEqual(layer.w2_weight_scale.shape, (2, 1, 1))
-        self.assertTrue(torch.equal(layer.w13_weight_scale, torch.full((2, 1, 2), 0.25, dtype=torch.float32)))
-        self.assertTrue(torch.equal(layer.w2_weight_scale, torch.full((2, 1, 1), 0.5, dtype=torch.float32)))
+        self.assertTrue(torch.equal(layer.w13_weight_scale, torch.full((2, 1, 2), 4.0, dtype=torch.float32)))
+        self.assertTrue(torch.equal(layer.w2_weight_scale, torch.full((2, 1, 1), 2.0, dtype=torch.float32)))
 
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")

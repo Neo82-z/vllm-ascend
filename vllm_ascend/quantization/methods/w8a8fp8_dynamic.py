@@ -35,7 +35,9 @@ def _get_weight_block_size(quant_config: dict[str, Any] | None) -> tuple[int, in
 
 
 def _dequant_scale_from_inv(scale_inv: torch.Tensor) -> torch.Tensor:
-    return torch.reciprocal(scale_inv.to(torch.float32)).contiguous()
+    # Qwen3/MiniMax block-FP8 checkpoints store the dequant multiplier
+    # under the historical `weight_scale_inv` name.
+    return scale_inv.to(torch.float32).contiguous()
 
 
 @register_scheme("W8A8FP8_DYNAMIC", "linear")
@@ -168,8 +170,7 @@ class AscendW8A8FP8DynamicFusedMoEMethod(AscendW8A8DynamicFusedMoEMethod):
 
         # Checkpoint scale_inv follows the original (N, K) block layout.
         # The weights are transposed above for Ascend kernels, so transpose
-        # block-scale axes in the same way and convert inverse scale to the
-        # dequant scale expected by runtime kernels.
+        # block-scale axes in the same way.
         layer.w13_weight_scale = _dequant_scale_from_inv(layer.w13_weight_scale_inv.data).transpose(1, 2).contiguous()
         layer.w2_weight_scale = _dequant_scale_from_inv(layer.w2_weight_scale_inv.data).transpose(1, 2).contiguous()
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale
