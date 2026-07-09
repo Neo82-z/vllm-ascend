@@ -20,11 +20,20 @@ import torch
 import torch.nn.functional as F
 from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 
 from vllm_ascend.ascend_forward_context import MoECommType
 from vllm_ascend.device.device_op import DeviceOperator
 from vllm_ascend.distributed.utils import split_tensor_along_first_dim
 from vllm_ascend.utils import get_weight_prefetch_method
+
+
+def _has_ascend_custom_op(op_name: str) -> bool:
+    try:
+        getattr(torch.ops._C_ascend, op_name)
+    except (AttributeError, RuntimeError):
+        return False
+    return True
 
 
 def select_experts(
@@ -145,6 +154,17 @@ def check_npu_moe_gating_top_k(
     scoring_func: str = "softmax",
     custom_routing_function: Callable | None = None,
 ):
+    if scoring_func == "sqrtsoftplus":
+        required_op = "moe_gating_top_k_hash"
+    else:
+        required_op = "moe_gating_top_k"
+    if not _has_ascend_custom_op(required_op):
+        logger.warning_once(
+            "Ascend custom op torch.ops._C_ascend.%s is unavailable. "
+            "Falling back to native MoE expert selection.",
+            required_op,
+        )
+        return False
     if scoring_func == "sigmoid" and not renormalize:  # sigmoid + renorm=0 is not supported in current branch
         return False
     if custom_routing_function is not None:

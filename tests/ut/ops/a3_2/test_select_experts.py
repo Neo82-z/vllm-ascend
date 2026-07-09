@@ -22,7 +22,7 @@ from pytest_mock import MockerFixture
 
 from tests.ut.base import TestBase
 from vllm_ascend.ascend_forward_context import MoECommType
-from vllm_ascend.ops.fused_moe.experts_selector import select_experts, zero_experts_compute
+from vllm_ascend.ops.fused_moe.experts_selector import check_npu_moe_gating_top_k, select_experts, zero_experts_compute
 from vllm_ascend.ops.fused_moe.moe_runtime_args import MoEPrepareOutput
 from vllm_ascend.utils import AscendDeviceType, adapt_patch, enable_custom_op
 
@@ -179,6 +179,20 @@ def mock_moe_env(mocker: MockerFixture):
 
 
 class TestExpertsSelector:
+    @patch("vllm_ascend.ops.fused_moe.experts_selector._has_ascend_custom_op", return_value=False)
+    def test_check_npu_moe_gating_top_k_falls_back_when_custom_op_missing(self, _):
+        hidden_states = torch.randn(2, 8)
+
+        assert not check_npu_moe_gating_top_k(
+            hidden_states=hidden_states,
+            top_k=2,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            scoring_func="softmax",
+            custom_routing_function=None,
+        )
+
     @pytest.mark.parametrize("num_experts", [256, 128])
     def test_select_experts(self, mock_dist_env, mock_moe_env, num_experts):
         x = torch.randn(8, 2)
