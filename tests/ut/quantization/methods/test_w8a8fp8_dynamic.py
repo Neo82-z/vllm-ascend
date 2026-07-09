@@ -37,6 +37,35 @@ class TestAscendW8A8FP8DynamicLinearMethod(TestBase):
             self.assertEqual(params["weight_scale"].shape, (128, 1))
             self.assertEqual(params["weight_offset"].shape, (128, 1))
 
+    def test_block_fp8_registers_scale_inv_as_group_param(self):
+        method = AscendW8A8FP8DynamicLinearMethod({"weight_block_size": [128, 128]})
+
+        self.assertTrue(method.has_block_scale_inv)
+        self.assertEqual(method.get_perchannel_param(256, torch.bfloat16), {})
+        params = method.get_pergroup_param(
+            input_size=2048,
+            output_size=768,
+            params_dtype=torch.bfloat16,
+        )
+
+        self.assertEqual(params["weight_scale_inv"].shape, (6, 16))
+        self.assertEqual(params["weight_scale_inv"].dtype, torch.bfloat16)
+
+    def test_block_fp8_process_converts_scale_inv_to_dequant_scale(self):
+        method = AscendW8A8FP8DynamicLinearMethod({"weight_block_size": [128, 128]})
+        layer = torch.nn.Module()
+        layer.weight = torch.nn.Parameter(torch.zeros(768, 2048, dtype=torch.float8_e4m3fn), requires_grad=False)
+        layer.weight_scale_inv = torch.nn.Parameter(
+            torch.full((6, 16), 2.0, dtype=torch.bfloat16),
+            requires_grad=False,
+        )
+
+        method.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.weight.shape, (2048, 768))
+        self.assertEqual(layer.weight_scale.shape, (6, 16))
+        self.assertTrue(torch.equal(layer.weight_scale, torch.full((6, 16), 0.5, dtype=torch.float32)))
+
 
 class TestAscendW8A8FP8FusedMoEMethod(TestBase):
     num_experts = 8
@@ -82,6 +111,51 @@ class TestAscendW8A8FP8FusedMoEMethod(TestBase):
             )
             self.assertEqual(param_dict["w13_weight"].shape[0], num_experts)
             self.assertEqual(param_dict["w2_weight"].shape[0], num_experts)
+
+    def test_block_fp8_registers_moe_scale_inv_params(self):
+        method = AscendW8A8FP8DynamicFusedMoEMethod({"weight_block_size": [128, 128]})
+
+        self.assertTrue(method.has_block_scale_inv)
+        param_dict = method.get_dynamic_quant_param(
+            num_experts=128,
+            intermediate_size_per_partition=768,
+            hidden_sizes=2048,
+            params_dtype=torch.bfloat16,
+        )
+
+        self.assertEqual(param_dict["w13_weight_scale_inv"].shape, (128, 12, 16))
+        self.assertEqual(param_dict["w2_weight_scale_inv"].shape, (128, 16, 6))
+        self.assertEqual(param_dict["w13_weight_scale_inv"].dtype, torch.bfloat16)
+        self.assertEqual(param_dict["w2_weight_scale_inv"].dtype, torch.bfloat16)
+
+    def test_block_fp8_process_converts_moe_scale_inv_to_dequant_scale(self):
+        method = AscendW8A8FP8DynamicFusedMoEMethod({"weight_block_size": [128, 128]})
+        layer = torch.nn.Module()
+        layer.w13_weight = torch.nn.Parameter(
+            torch.zeros(2, 256, 128, dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.w2_weight = torch.nn.Parameter(
+            torch.zeros(2, 128, 128, dtype=torch.float8_e4m3fn),
+            requires_grad=False,
+        )
+        layer.w13_weight_scale_inv = torch.nn.Parameter(
+            torch.full((2, 2, 1), 4.0, dtype=torch.bfloat16),
+            requires_grad=False,
+        )
+        layer.w2_weight_scale_inv = torch.nn.Parameter(
+            torch.full((2, 1, 1), 2.0, dtype=torch.bfloat16),
+            requires_grad=False,
+        )
+
+        method.process_weights_after_loading(layer)
+
+        self.assertEqual(layer.w13_weight.shape, (2, 128, 256))
+        self.assertEqual(layer.w2_weight.shape, (2, 128, 128))
+        self.assertEqual(layer.w13_weight_scale.shape, (2, 1, 2))
+        self.assertEqual(layer.w2_weight_scale.shape, (2, 1, 1))
+        self.assertTrue(torch.equal(layer.w13_weight_scale, torch.full((2, 1, 2), 0.25, dtype=torch.float32)))
+        self.assertTrue(torch.equal(layer.w2_weight_scale, torch.full((2, 1, 1), 0.5, dtype=torch.float32)))
 
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic._EXTRA_CTX")
     @patch("vllm_ascend.quantization.methods.w8a8_dynamic.select_experts")

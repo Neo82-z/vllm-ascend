@@ -78,6 +78,10 @@ def _uses_deepseek_fp8_layout() -> bool:
     return all(hasattr(hf_config, attr) for attr in ("o_groups", "o_lora_rank"))
 
 
+def _uses_block_fp8_layout(quant_description: dict[str, Any]) -> bool:
+    return quant_description.get("weight_block_size") is not None
+
+
 @register_quantization_config(FP8_METHOD)
 class AscendFp8Config(QuantizationConfig):
     def __init__(
@@ -148,7 +152,9 @@ class AscendFp8Config(QuantizationConfig):
                     prefix,
                     "linear",
                     self.packed_modules_mapping,
-                    quant_type="W8A8_MXFP8",
+                    quant_type="W8A8FP8_DYNAMIC"
+                    if _uses_block_fp8_layout(self.quant_description)
+                    else "W8A8_MXFP8",
                 )
             quant_method = AscendLinearMethod(scheme)
             return quant_method
@@ -167,7 +173,9 @@ class AscendFp8Config(QuantizationConfig):
                     prefix,
                     "moe",
                     self.packed_modules_mapping,
-                    quant_type="W8A8_MXFP8",
+                    quant_type="W8A8FP8_DYNAMIC"
+                    if _uses_block_fp8_layout(self.quant_description)
+                    else "W8A8_MXFP8",
                 )
             quant_method = AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid=tid2eid)
             return quant_method
