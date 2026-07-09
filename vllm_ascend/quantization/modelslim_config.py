@@ -51,7 +51,14 @@ from vllm_ascend.utils import (
 if vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import FusedMoE
 else:
-    from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
+    try:
+        from vllm.model_executor.layers.fused_moe import MoERunner, RoutedExperts
+    except ImportError:
+        try:
+            from vllm.model_executor.layers.fused_moe import RoutedExperts
+        except ImportError:
+            from vllm.model_executor.layers.fused_moe import FusedMoE as RoutedExperts
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from .methods import get_scheme_class
 

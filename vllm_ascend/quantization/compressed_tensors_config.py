@@ -39,7 +39,10 @@ from .methods import AscendLinearScheme, AscendMoEScheme
 if vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import FusedMoE
 else:
-    from vllm.model_executor.layers.fused_moe import MoERunner
+    try:
+        from vllm.model_executor.layers.fused_moe import MoERunner
+    except ImportError:
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 
 def _is_fused_moe_layer(layer: torch.nn.Module) -> bool:

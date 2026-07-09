@@ -12,7 +12,10 @@ from vllm_ascend.utils import FP8_METHOD, vllm_version_is
 if vllm_version_is("0.23.0"):
     from vllm.model_executor.layers.fused_moe import FusedMoE
 else:
-    from vllm.model_executor.layers.fused_moe import MoERunner
+    try:
+        from vllm.model_executor.layers.fused_moe import MoERunner
+    except ImportError:
+        from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 
 from .methods import get_scheme_class
 
