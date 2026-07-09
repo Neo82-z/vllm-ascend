@@ -20,6 +20,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import torch_npu
+from vllm.logger import logger
 from vllm.triton_utils import HAS_TRITON
 
 from vllm_ascend.device import utils as device_utils
@@ -112,7 +113,36 @@ class BaseDeviceAdaptor:
         quant_mode: int = -1,
         act_quant_type: torch.dtype | None = None,
     ):
-        return torch.ops._C_ascend.npu_moe_init_routing_custom(
+        try:
+            init_routing_custom = torch.ops._C_ascend.npu_moe_init_routing_custom
+        except (AttributeError, RuntimeError):
+            init_routing_custom = None
+
+        if init_routing_custom is not None:
+            return init_routing_custom(
+                hidden_states,
+                topk_ids,
+                scale=scale,
+                active_num=active_num,
+                expert_num=expert_num,
+                expert_tokens_num_type=expert_tokens_num_type,
+                expert_tokens_num_flag=expert_tokens_num_flag,
+                active_expert_range=active_expert_range,
+                quant_mode=quant_mode,
+            )
+
+        if not hasattr(torch_npu, "npu_moe_init_routing_v2"):
+            raise AttributeError(
+                "Neither torch.ops._C_ascend.npu_moe_init_routing_custom nor "
+                "torch_npu.npu_moe_init_routing_v2 is available."
+            )
+
+        logger.warning_once(
+            "Ascend custom op torch.ops._C_ascend.npu_moe_init_routing_custom "
+            "is unavailable. Falling back to torch_npu.npu_moe_init_routing_v2."
+        )
+        input_dtype = act_quant_type or hidden_states.dtype
+        return torch_npu.npu_moe_init_routing_v2(
             hidden_states,
             topk_ids,
             scale=scale,
@@ -122,6 +152,7 @@ class BaseDeviceAdaptor:
             expert_tokens_num_flag=expert_tokens_num_flag,
             active_expert_range=active_expert_range,
             quant_mode=quant_mode,
+            x_dtype=input_dtype if input_dtype in QUANT_DTYPES else None,
         )
 
     @staticmethod
