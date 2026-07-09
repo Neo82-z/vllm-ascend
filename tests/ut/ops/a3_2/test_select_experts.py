@@ -179,6 +179,20 @@ def mock_moe_env(mocker: MockerFixture):
 
 
 class TestExpertsSelector:
+    def test_check_npu_moe_gating_top_k_can_be_disabled_by_env(self, monkeypatch):
+        monkeypatch.setenv("VLLM_ASCEND_DISABLE_MOE_GATING_TOPK", "1")
+        hidden_states = torch.randn(2, 8)
+
+        assert not check_npu_moe_gating_top_k(
+            hidden_states=hidden_states,
+            top_k=2,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            scoring_func="softmax",
+            custom_routing_function=None,
+        )
+
     @patch("vllm_ascend.ops.fused_moe.experts_selector._has_ascend_custom_op", return_value=False)
     def test_check_npu_moe_gating_top_k_falls_back_when_custom_op_missing(self, _):
         hidden_states = torch.randn(2, 8)

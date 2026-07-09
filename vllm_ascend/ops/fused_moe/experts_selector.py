@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 from collections.abc import Callable
 
 import torch
@@ -34,6 +35,15 @@ def _has_ascend_custom_op(op_name: str) -> bool:
     except (AttributeError, RuntimeError):
         return False
     return True
+
+
+def _disable_ascend_moe_gating_top_k() -> bool:
+    return os.environ.get("VLLM_ASCEND_DISABLE_MOE_GATING_TOPK", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def select_experts(
@@ -154,6 +164,13 @@ def check_npu_moe_gating_top_k(
     scoring_func: str = "softmax",
     custom_routing_function: Callable | None = None,
 ):
+    if _disable_ascend_moe_gating_top_k():
+        logger.warning_once(
+            "Ascend MoE gating top-k custom op is disabled by "
+            "VLLM_ASCEND_DISABLE_MOE_GATING_TOPK. Falling back to native "
+            "MoE expert selection."
+        )
+        return False
     if scoring_func == "sqrtsoftplus":
         required_op = "moe_gating_top_k_hash"
     else:
