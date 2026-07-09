@@ -79,7 +79,9 @@ class AscendW8A8FP8DynamicLinearMethod(AscendW8A8DynamicLinearMethod):
                 cdiv(output_size, block_n),
                 cdiv(input_size, block_k),
                 dtype=params_dtype,
-            )
+            ),
+            "_packed_dim": 0,
+            "_packed_factor": block_n,
         }
 
     def apply(

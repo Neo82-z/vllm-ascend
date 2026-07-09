@@ -50,6 +50,8 @@ class TestAscendW8A8FP8DynamicLinearMethod(TestBase):
 
         self.assertEqual(params["weight_scale_inv"].shape, (6, 16))
         self.assertEqual(params["weight_scale_inv"].dtype, torch.bfloat16)
+        self.assertEqual(params["_packed_dim"], 0)
+        self.assertEqual(params["_packed_factor"], 128)
 
     def test_block_fp8_process_converts_scale_inv_to_dequant_scale(self):
         method = AscendW8A8FP8DynamicLinearMethod({"weight_block_size": [128, 128]})
