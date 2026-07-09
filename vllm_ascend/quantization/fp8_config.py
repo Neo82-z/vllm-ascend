@@ -45,6 +45,7 @@ def create_scheme_for_layer(
     prefix: str,
     layer_type: str,
     packed_modules_mapping: dict[str, Any] | None = None,
+    quant_type: str = "FP8",
 ):
     """Create a quantization scheme instance for a layer.
 
@@ -53,19 +54,28 @@ def create_scheme_for_layer(
         prefix: The layer prefix.
         layer_type: The type of layer ("linear", "moe", "attention").
         packed_modules_mapping: Mapping for packed/fused modules.
+        quant_type: The registered Ascend quantization type.
 
     Returns:
         An instance of the appropriate quantization scheme class.
     """
     logger.info_once("Using the vLLM Ascend fp8 Quantization now!")
-    quant_type = "FP8"
 
     # Use registry to get scheme class
     scheme_cls = get_scheme_class(quant_type, layer_type)
     if scheme_cls is not None:
+        if quant_type == "W8A8_MXFP8":
+            return scheme_cls()
         return scheme_cls(quant_description)
 
     raise NotImplementedError(f"Currently, vLLM Ascend doesn't support {quant_type} for {layer_type}.")
+
+
+def _uses_deepseek_fp8_layout() -> bool:
+    from vllm.config import get_current_vllm_config
+
+    hf_config = get_current_vllm_config().model_config.hf_config
+    return all(hasattr(hf_config, attr) for attr in ("o_groups", "o_lora_rank"))
 
 
 @register_quantization_config(FP8_METHOD)
@@ -125,12 +135,40 @@ class AscendFp8Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             layer.ascend_quant_method = FP8_METHOD
 
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "ds_linear", self.packed_modules_mapping)
+            if _uses_deepseek_fp8_layout():
+                scheme = create_scheme_for_layer(
+                    self.quant_description,
+                    prefix,
+                    "ds_linear",
+                    self.packed_modules_mapping,
+                )
+            else:
+                scheme = create_scheme_for_layer(
+                    self.quant_description,
+                    prefix,
+                    "linear",
+                    self.packed_modules_mapping,
+                    quant_type="W8A8_MXFP8",
+                )
             quant_method = AscendLinearMethod(scheme)
             return quant_method
         if _is_fused_moe_layer(layer):
             layer.ascend_quant_method = FP8_METHOD
-            scheme = create_scheme_for_layer(self.quant_description, prefix, "w4a8_moe", self.packed_modules_mapping)
+            if _uses_deepseek_fp8_layout():
+                scheme = create_scheme_for_layer(
+                    self.quant_description,
+                    prefix,
+                    "w4a8_moe",
+                    self.packed_modules_mapping,
+                )
+            else:
+                scheme = create_scheme_for_layer(
+                    self.quant_description,
+                    prefix,
+                    "moe",
+                    self.packed_modules_mapping,
+                    quant_type="W8A8_MXFP8",
+                )
             quant_method = AscendFusedMoEMethod(scheme, layer.moe_config, tid2eid=tid2eid)
             return quant_method
         return None
