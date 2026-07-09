@@ -462,6 +462,101 @@ def test_determine_batch_execution_dbo_below_threshold_still_coordinates_dp(
     assert should_ubatch is False
 
 
+@pytest.mark.parametrize(
+    (
+        "num_computed_tokens",
+        "num_scheduled_tokens",
+        "num_tokens",
+        "num_reqs",
+        "max_num_scheduled_tokens",
+        "decode_threshold",
+        "prefill_threshold",
+        "expected_allow_microbatching",
+    ),
+    [
+        pytest.param(
+            [1, 1, 1, 1],
+            [1, 1, 1, 1],
+            4,
+            4,
+            1,
+            4,
+            999,
+            True,
+            id="decode_hits_decode_threshold",
+        ),
+        pytest.param(
+            [0, 0],
+            [5, 5],
+            10,
+            2,
+            5,
+            999,
+            10,
+            True,
+            id="prefill_hits_prefill_threshold",
+        ),
+        pytest.param(
+            [0, 0],
+            [5, 5],
+            10,
+            2,
+            5,
+            1,
+            11,
+            False,
+            id="prefill_misses_prefill_threshold",
+        ),
+    ],
+)
+def test_determine_batch_execution_passes_dbo_threshold_result_to_dp_coordination(
+    model_runner,
+    num_computed_tokens,
+    num_scheduled_tokens,
+    num_tokens,
+    num_reqs,
+    max_num_scheduled_tokens,
+    decode_threshold,
+    prefill_threshold,
+    expected_allow_microbatching,
+):
+    runner = model_runner
+    runner.parallel_config.data_parallel_size = 2
+    runner.parallel_config.data_parallel_rank = 0
+    runner.parallel_config.enable_dbo = True
+    runner.parallel_config.dbo_decode_token_threshold = decode_threshold
+    runner.parallel_config.dbo_prefill_token_threshold = prefill_threshold
+    runner.input_batch.num_computed_tokens_cpu[:num_reqs] = num_computed_tokens
+    num_scheduled_tokens_np = np.array(num_scheduled_tokens, dtype=np.int32)
+
+    with patch(
+        "vllm_ascend.worker.model_runner_v1.coordinate_batch_across_dp",
+        return_value=(
+            expected_allow_microbatching,
+            np.array([num_tokens, num_tokens], dtype=np.int32),
+            CUDAGraphMode.NONE.value,
+        ),
+    ) as mock_coordinate:
+        (
+            _cudagraph_mode,
+            _batch_desc,
+            should_ubatch,
+            _num_tokens_across_dp,
+            _cudagraph_stats,
+        ) = runner._determine_batch_execution_and_padding(
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            num_scheduled_tokens_np=num_scheduled_tokens_np,
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            use_cascade_attn=False,
+            force_eager=True,
+        )
+
+    mock_coordinate.assert_called_once()
+    assert mock_coordinate.call_args.kwargs["allow_microbatching"] is expected_allow_microbatching
+    assert should_ubatch is expected_allow_microbatching
+
+
 def test_determine_batch_execution_dbo_single_dp_does_not_ubatch(model_runner):
     runner = model_runner
     runner.parallel_config.data_parallel_size = 1

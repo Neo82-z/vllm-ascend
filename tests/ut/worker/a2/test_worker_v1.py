@@ -309,6 +309,54 @@ class TestNPUWorker(TestBase):
             self.assertEqual(worker.init_snapshot, mock_snapshot)
             self.assertEqual(worker.requested_memory, 2000 * 0.5)
 
+    @patch("vllm_ascend.worker.worker.NPUModelRunner")
+    @patch("vllm_ascend.worker.worker.init_workspace_manager")
+    @patch("vllm_ascend.worker.worker.NPUWorker._init_device")
+    def test_init_device_uses_dbo_workspace_slots(
+        self,
+        mock_init_device,
+        mock_init_workspace_manager,
+        mock_model_runner,
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.device = torch.device("npu:0")
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.parallel_config.enable_dbo = True
+            worker.use_v2_model_runner = False
+            mock_init_device.return_value = worker.device
+
+            worker.init_device()
+
+        mock_init_workspace_manager.assert_called_once_with(worker.device, 2)
+        mock_model_runner.assert_called_once_with(worker.vllm_config, worker.device)
+
+    @patch("vllm_ascend.worker.worker.NPUModelRunner")
+    @patch("vllm_ascend.worker.worker.init_workspace_manager")
+    @patch("vllm_ascend.worker.worker.NPUWorker._init_device")
+    def test_init_device_uses_single_workspace_slot_without_dbo(
+        self,
+        mock_init_device,
+        mock_init_workspace_manager,
+        mock_model_runner,
+    ):
+        from vllm_ascend.worker.worker import NPUWorker
+
+        with patch.object(NPUWorker, "__init__", lambda x, **kwargs: None):
+            worker = NPUWorker()
+            worker.device = torch.device("npu:0")
+            worker.vllm_config = MagicMock()
+            worker.vllm_config.parallel_config.enable_dbo = False
+            worker.use_v2_model_runner = False
+            mock_init_device.return_value = worker.device
+
+            worker.init_device()
+
+        mock_init_workspace_manager.assert_called_once_with(worker.device, 1)
+        mock_model_runner.assert_called_once_with(worker.vllm_config, worker.device)
+
     def test_profile_start_stop(self):
         """Test profile method start and stop"""
         from vllm_ascend.worker.worker import NPUWorker

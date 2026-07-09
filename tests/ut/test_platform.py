@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from vllm.config import ParallelConfig
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.platforms import PlatformEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig  # type: ignore
@@ -734,15 +735,30 @@ class TestNPUPlatform(TestBase):
     def test_fix_incompatible_config_preserves_enable_dbo(self, _mock_enable_sp):
         vllm_config = TestNPUPlatform.mock_vllm_config()
         vllm_config.parallel_config.enable_dbo = True
-        vllm_config.parallel_config.use_ubatching = True
-        vllm_config.parallel_config.num_ubatches = 2
+        vllm_config.parallel_config.dbo_decode_token_threshold = 7
+        vllm_config.parallel_config.dbo_prefill_token_threshold = 99
         vllm_config.parallel_config.enable_expert_parallel = True
 
         self.platform._fix_incompatible_config(vllm_config)
 
         self.assertTrue(vllm_config.parallel_config.enable_dbo)
-        self.assertEqual(vllm_config.parallel_config.dbo_decode_token_threshold, 32)
-        self.assertEqual(vllm_config.parallel_config.dbo_prefill_token_threshold, 512)
+        self.assertEqual(vllm_config.parallel_config.dbo_decode_token_threshold, 7)
+        self.assertEqual(vllm_config.parallel_config.dbo_prefill_token_threshold, 99)
+
+    def test_parallel_config_dbo_parameter_semantics(self):
+        parallel_config = ParallelConfig()
+
+        self.assertFalse(parallel_config.enable_dbo)
+        self.assertEqual(parallel_config.ubatch_size, 0)
+        self.assertEqual(parallel_config.dbo_decode_token_threshold, 32)
+        self.assertEqual(parallel_config.dbo_prefill_token_threshold, 512)
+        self.assertFalse(parallel_config.use_ubatching)
+        self.assertEqual(parallel_config.num_ubatches, 0)
+
+        parallel_config.enable_dbo = True
+
+        self.assertTrue(parallel_config.use_ubatching)
+        self.assertEqual(parallel_config.num_ubatches, 2)
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     def test_fix_incompatible_config_resets_ubatch_size(self, _mock_enable_sp):
