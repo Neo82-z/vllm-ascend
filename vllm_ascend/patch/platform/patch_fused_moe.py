@@ -27,6 +27,8 @@
 #   2. from vllm_ascend import ops
 #   3. model loading  ->  deepseek_v2 imported  ->  gets patched FusedMoE  ✓
 
+import inspect
+
 from vllm_ascend.utils import is_310p, vllm_version_is
 
 if not vllm_version_is("0.23.0"):
@@ -35,6 +37,8 @@ if not vllm_version_is("0.23.0"):
 
     # Capture the real original before fused_moe.py's module-level code runs.
     _original_FusedMoE = _fused_moe_layer.FusedMoE
+    _original_FusedMoE_signature = inspect.signature(_original_FusedMoE)
+    _supports_runner_cls = "runner_cls" in _original_FusedMoE_signature.parameters
 
     if is_310p():
         from vllm_ascend._310p.fused_moe.fused_moe import AscendMoERunner310 as _DefaultAscendMoERunner
@@ -42,12 +46,15 @@ if not vllm_version_is("0.23.0"):
         from vllm_ascend.ops.fused_moe.fused_moe import AscendMoERunner as _DefaultAscendMoERunner
 
     def _ascend_FusedMoE(*args, runner_cls=None, runner_args=None, **kwargs):
-        if runner_cls is None:
-            runner_cls = _DefaultAscendMoERunner
         # 'hash' is a DeepSeek V4 flag already consumed before FusedMoE is called;
         # 'tid2eid' is Ascend-specific and must reach AscendMoERunner via runner_args.
         kwargs.pop("hash", None)
         tid2eid = kwargs.pop("tid2eid", None)
+        if not _supports_runner_cls:
+            return _original_FusedMoE(*args, **kwargs)
+
+        if runner_cls is None:
+            runner_cls = _DefaultAscendMoERunner
         if tid2eid is not None:
             runner_args = dict(runner_args) if runner_args is not None else {}
             runner_args["tid2eid"] = tid2eid
