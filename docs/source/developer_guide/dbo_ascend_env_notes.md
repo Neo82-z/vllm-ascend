@@ -22,6 +22,10 @@
 5. MoE 模型能进入 NPU worker / model runner；
 6. DBO 参数不会在 Ascend 平台层被强制禁用。
 
+2026-07-09 后续 smoke 目标收敛为 Qwen3 及以上 MoE 模型。Qwen1.5-MoE
+与 DeepSeek-V2-Lite 的记录仅作为环境和主线 API 漂移样本保留，不再作为当前
+DBO PoC 的主要验证对象。
+
 ## 已确认可用项
 
 ### CANN 9.0.0 动态库
@@ -300,11 +304,9 @@ FusedMoE.__init__() got an unexpected keyword argument 'runner_cls'
 `vllm_ascend.patch.platform.patch_fused_moe` 按新版 vLLM factory 语义向
 `FusedMoE` 注入 Ascend MoE runner。
 
-临时 smoke 处理为对原始 `FusedMoE` 做签名探测：
-
-- 若支持 `runner_cls`，继续注入 `AscendMoERunner`；
-- 若不支持 `runner_cls`，清理 `hash` / `tid2eid` 等下游额外参数后回退原始 `FusedMoE`；
-- 该处理只用于继续推进 engine smoke，不代表 MoE communication overlap 已验证。
+该问题说明当前 DeepSeek-V2-Lite smoke 使用的 vLLM 版本与 vLLM-Ascend
+MoE patch 预期不一致。由于主线正在转向新版 `FusedMoE` factory 语义，本
+PoC 不再为旧式 class 接口增加兼容层，避免把验证工作转向过时组合。
 
 ### KVCacheSpecRegistry 删除
 
@@ -398,7 +400,7 @@ from vllm.model_executor.layers.mamba.linear.minimax_linear_attn import ...
 
 ## 模型验证状态
 
-### Qwen1.5-MoE-A2.7B-Chat
+### Qwen1.5-MoE-A2.7B-Chat（停止追踪）
 
 ModelScope config 读取成功：
 
@@ -411,8 +413,9 @@ moe_intermediate_size: 1408
 ```
 
 但 engine 启动过程中被多个无关 patch / main API drift 阻塞，未能进入稳定推理。
+该模型属于较旧 Qwen2-MoE 架构，不再作为当前 smoke 主线。
 
-### DeepSeek-V2-Lite
+### DeepSeek-V2-Lite（停止追踪）
 
 ModelScope config 读取成功：
 
@@ -430,6 +433,20 @@ kv_lora_rank: 512
 - ATB `libatb.so` 路径；
 - `bailing_moe_linear_attn` 依赖的 vLLM mamba linear 路径漂移；
 - vLLM-Ascend worker/custom op 全量 import 导致的无关模型模块提前失败。
+
+由于该路径继续推进会变成旧模型和旧 vLLM MoE 接口兼容工作，后续不再以该模型
+作为 DBO PoC 的优先目标。
+
+### Qwen3+ MoE（后续目标）
+
+后续 smoke 优先选择 Qwen3 及以上的 MoE 模型，目标是贴近当前 vLLM /
+vLLM-Ascend 主线 MoE factory 语义，避免为旧式 `FusedMoE` class 接口补
+兼容层。建议先完成 dense Qwen3 基础链路，再切到 Qwen3 MoE：
+
+1. Qwen3 dense 小模型：验证 vLLM-Ascend worker、NPU device、权重加载与基础推理；
+2. Qwen3 MoE 小/中模型：验证 MoE layer 初始化和 custom op 注册；
+3. 双卡 MoE：验证 HCCL / all_to_all 与 EP/DP 配置；
+4. DBO 参数：验证 `--enable-dbo` 与 prefill/decode threshold 在 MoE 场景下进入调度路径。
 
 ## 分层验证建议
 
