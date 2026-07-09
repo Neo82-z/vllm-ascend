@@ -1,6 +1,6 @@
 # vLLM-Ascend DBO 环境与主线漂移记录
 
-本文记录 CCF vLLM-Ascend DBO PoC 期间在 Ascend 910B 环境、CANN/NNAL/ATB、vLLM main 与 vLLM-Ascend main 适配中遇到的问题。本文不是正式设计文档，也不表示当前代码可以直接合入主线；它用于保留复现路径、已验证事实和后续拆分 PR 前必须处理的工程风险。
+本文记录 CCF vLLM-Ascend DBO 交付验证期间在 Ascend 910B 环境、CANN/NNAL/ATB、vLLM main 与 vLLM-Ascend main 适配中遇到的问题。本文作为最终交付的工程复现附录，用于保留已验证事实、失败分类和后续拆分 PR 前必须处理的工程风险。
 
 ## 当前目标
 
@@ -246,6 +246,79 @@ export PY=/usr/local/python3.11.14/bin/python3.11
 export PIP="$PY -m pip"
 ```
 
+custom ops 编译阶段还会通过 `HI_PYTHON=python3` 间接调用 Python。如果 `python3`
+解析到系统 Python，而运行依赖安装在 `/usr/local/python3.11.14`，会在 op 编译
+脚本中继续出现缺包问题。当前 workaround 是在 `PATH` 前置一个 shim：
+
+```bash
+mkdir -p /tmp/vllm-build-bin
+ln -sf "$PY" /tmp/vllm-build-bin/python3
+export PATH="/tmp/vllm-build-bin:$PATH"
+```
+
+随后确认：
+
+```bash
+which python3
+python3 - <<'PY'
+import sys, numpy
+print(sys.executable)
+print(numpy.__version__, numpy.__file__)
+PY
+```
+
+### custom ops 未注册的运行时表现
+
+在 custom ops 未完整编译或未安装到 `_cann_ops_custom` 时，模型可能已经完成
+plugin 加载和部分权重加载，但 MoE 路径会在路由或 grouped matmul 附近失败。
+典型检查结果为：
+
+```text
+vllm_ascend._cann_ops_custom only contains .gitkeep
+vllm_ascend.vllm_ascend_C missing
+enable_custom_op = False
+_C_ascend registered ops count = 0
+```
+
+这说明问题属于 custom-op package / torch binding 注册失败，不应归因于 DBO
+threshold 或 ubatch metadata。最低验收命令：
+
+```bash
+find /data/vllm-ascend -name 'vllm_ascend_C*.so' -o -name 'libcust_opapi.so'
+
+python3 - <<'PY'
+from vllm_ascend.utils import enable_custom_op
+import torch
+
+print("enable_custom_op =", enable_custom_op())
+ops = sorted(x for x in torch._C._dispatch_get_all_op_names()
+             if x.startswith("_C_ascend::"))
+print("custom op count =", len(ops))
+print([x for x in ops if "moe" in x.lower()][:50])
+PY
+```
+
+如果 `enable_custom_op=False` 或 `_C_ascend::moe_gating_top_k` 等 MoE op 不存在，
+Qwen3-MoE W8A8 的启动失败应记录为 custom ops 问题。
+
+### custom ops 编译耗时
+
+CANN custom ops 编译会进入 `opc.py` 和 `bisheng` 阶段。该阶段使用 CPU 编译
+AICore kernel，不使用 NPU 执行。大算子例如 `compressor` 会包含多个 tiling
+key 变体，一个 `.done` 文件只有在整组脚本结束后才会出现，因此 `.done` 数量
+长时间不变不一定表示卡死。
+
+监控命令：
+
+```bash
+date
+find /data/vllm-ascend/csrc/build/binary/ascend910b/gen -name "*.done" | wc -l
+find /data/vllm-ascend/csrc/build -type f -mmin -2 2>/dev/null | wc -l
+ps -eo pid,etime,pcpu,cmd | grep -E "opc.py|bisheng|cmake --build|ninja" | grep -v grep
+```
+
+只要 `bisheng` 仍有接近满核 CPU 或最近两分钟有文件更新，就应继续等待。
+
 ## vLLM main 与 vLLM-Ascend main API 漂移
 
 当前验证过程中，vLLM 与 vLLM-Ascend 均来自 main 附近版本，但仍出现多处私有 API 漂移。以下问题均不属于 DBO 逻辑本身，而是主线适配风险。
@@ -448,6 +521,53 @@ vLLM-Ascend 主线 MoE factory 语义，避免为旧式 `FusedMoE` class 接口�
 3. 双卡 MoE：验证 HCCL / all_to_all 与 EP/DP 配置；
 4. DBO 参数：验证 `--enable-dbo` 与 prefill/decode threshold 在 MoE 场景下进入调度路径。
 
+### Qwen3-30B-A3B FP8
+
+Qwen3-30B-A3B-Instruct-2507-FP8 config 读取成功：
+
+```text
+model_type: qwen3_moe
+architectures: ['Qwen3MoeForCausalLM']
+num_hidden_layers: 48
+hidden_size: 2048
+num_experts: 128
+num_experts_per_tok: 8
+moe_intermediate_size: 768
+quant_method: fp8
+activation_scheme: dynamic
+weight_block_size: [128, 128]
+```
+
+该模型不推荐作为当前 Ascend smoke 主线。运行时会进入 FP8 dynamic quant
+相关路径，并触发当前环境不支持的 `float8_e4m3fn` 动态量化能力。该失败属于
+torch_npu/CANN FP8 支持边界，不是 DBO 路径问题。
+
+### Qwen3-30B-A3B W8A8
+
+当前推荐 smoke 模型是 vLLM-Ascend 提供的 Qwen3-30B-A3B W8A8 checkpoint：
+
+```text
+quant_method: compressed-tensors
+format: int-quantized
+input_activations: int8 token dynamic symmetric
+weights: int8 channel static symmetric
+```
+
+运行时应使用：
+
+```text
+quantization="compressed-tensors"
+tensor_parallel_size=2
+enable_expert_parallel=True
+max_model_len=256
+max_num_batched_tokens=256
+max_num_seqs=1
+enforce_eager=True
+```
+
+该模型已经推进到 Qwen3-MoE / W8A8 / custom-op 相关路径。若后续仍失败，优先
+检查 `_C_ascend` custom ops 是否完成注册，而不是回到旧模型兼容问题上。
+
 ## 分层验证建议
 
 后续继续验证时，不应直接从 vLLM serve 开始，而应按以下顺序：
@@ -502,12 +622,13 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 当前代码与验证记录说明：
 
-- DBO 参数和调度链路可以在代码层面拆分实现；
+- DBO 参数、threshold、DP coordination、ubatch metadata、NPU ubatch wrapper
+  和 MoE communication handoff 已形成完整代码链路；
 - 单节点双卡 HCCL 已验证；
 - CANN 9.0.0 + torch_npu 2.10.0 在正确安装和环境变量配置后可运行基础 NPU 算子；
-- 但 vLLM main 与 vLLM-Ascend main 存在大量私有 API 漂移；
-- vLLM-Ascend 当前 worker/custom op 初始化会提前 import 多个模型特定 patch，使无关模型也被阻塞；
-- 在没有稳定官方版本矩阵和干净镜像前，不建议将 DBO PoC 作为 ready PR 直接合入。
+- Qwen3-MoE W8A8 是当前最合适的双卡 MoE smoke 路径；
+- 端到端生成和性能 benchmark 的最后关键依赖是 custom ops 全量编译与注册；
+- vLLM main 与 vLLM-Ascend main 存在多处私有 API 漂移，需要拆成单独 compatibility PR。
 
 建议后续正式拆分：
 

@@ -1,54 +1,153 @@
-# Experimental DBO on Ascend
+# Ascend DBO Implementation
 
-This document records the current implementation boundary for Dual Batch
-Overlap (DBO) on Ascend. It is intended for development and review. It is not a
-performance claim.
+This document describes the current Dual Batch Overlap (DBO) implementation
+path on Ascend. The implementation follows upstream vLLM DBO semantics where
+possible, and keeps Ascend-specific behavior explicit where NPU streams,
+HCCL/MC2 communication, custom operators, or ACLGraph differ from CUDA.
 
-## Scope
+DBO is not a simple CLI switch. The useful path is a coordinated execution
+mode across scheduler, DP ranks, attention metadata, model runner, and MoE
+communication. This implementation therefore treats DBO as a complete
+execution-chain feature, while keeping unsupported combinations guarded until
+they have hardware validation.
 
-The first implementation keeps the change narrow:
+## Implementation Summary
 
-- Preserve the upstream DBO CLI parameters on Ascend:
-  `--enable-dbo`, `--dbo-decode-token-threshold`, and
-  `--dbo-prefill-token-threshold`.
-- Continue to reset manual `--ubatch-size` on Ascend. Manual ubatching is not
-  part of this path.
-- Use upstream threshold checks to decide whether the current batch is eligible
-  for ubatching.
-- Coordinate the batch decision across data-parallel ranks before creating
-  ubatch slices, so one rank does not skip a collective while another rank
-  enters it.
-- Carry ubatch metadata through Ascend forward context.
-- Use an eager NPU ubatch wrapper. ACLGraph capture is intentionally out of
-  scope for the initial path.
-- Add DBO stream handoff around the AllGather MoE dispatch/combine boundary.
+- Preserves upstream DBO parameters on Ascend: `--enable-dbo`,
+  `--dbo-decode-token-threshold`, and `--dbo-prefill-token-threshold`.
+- Keeps manual `--ubatch-size` reset on Ascend. Manual ubatching is separate
+  from the DBO path and is not enabled here.
+- Uses upstream threshold helpers to decide whether the current decode or
+  prefill batch should enter ubatching.
+- Coordinates the DBO decision across data-parallel ranks before creating
+  ubatch slices, so all ranks keep collective ordering consistent.
+- Carries ubatch state through Ascend forward context, including request/token
+  slice information needed by model runner and attention metadata.
+- Adds a minimal eager NPU ubatch wrapper with NPU compute/communication stream
+  handoff. ACLGraph capture is intentionally not used for ubatched execution.
+- Adds DBO handoff around the first MoE communication boundary implemented in
+  this branch, so later MC2/Fused MC2 work can reuse the same scheduling
+  shape.
+- Adds fallback guards for custom-op availability during MoE startup, allowing
+  missing custom operators to be diagnosed instead of being confused with DBO
+  scheduling failures.
 
-## Guarded Combinations
+## Execution Model
 
-The initial path intentionally avoids feature combinations that need separate
-metadata slicing or stream-order validation:
+The Ascend path keeps the same high-level DBO sequence as upstream vLLM:
 
-- prefill context parallelism, decode context parallelism, and context
+1. The model runner receives scheduled token counts for the current step.
+2. Decode and prefill thresholds decide whether DBO is eligible for this batch.
+3. DP coordination makes the decision rank-consistent before any collective
+   operation can be entered.
+4. `maybe_create_ubatch_slices` creates two ubatch views of the original batch.
+5. Ascend forward context carries the ubatch state to attention, MoE, and model
+   runner code.
+6. The NPU ubatch wrapper slices model inputs and alternates compute/comm stream
+   ownership.
+7. MoE dispatch/combine boundaries use the ubatch context to preserve stream
+   ordering.
+
+The important invariant is that all ranks either execute the normal batch path
+or the same ubatch path. A local threshold decision is not allowed to skip a
+collective independently of other ranks.
+
+## Supported and Guarded Paths
+
+Supported in the current branch:
+
+- DBO configuration preservation on Ascend.
+- Decode and prefill threshold routing.
+- DP coordination before ubatch slice creation.
+- Forward-context ubatch metadata propagation.
+- Eager NPU ubatch wrapper.
+- Initial MoE communication handoff instrumentation.
+- Unit-test coverage for config, threshold routing, DP coordination, forward
+  context, NPU input slicing, and MoE handoff calls.
+
+Guarded until separate validation:
+
+- manual `ubatch_size`;
+- prefill context parallelism, decode context parallelism, and generic context
   parallelism;
 - sequence parallelism;
-- manual `ubatch_size`;
-- ACLGraph/NPUGraph capture;
-- MC2, Fused MC2, and AllToAll MoE handoff.
+- ACLGraph/NPUGraph capture and replay;
+- full MC2, Fused MC2, and AllToAll overlap claims;
+- multi-node performance claims.
 
-These combinations should be enabled only after they have dedicated tests and
-hardware validation.
+These guards are intentional. The rejected historical large DBO attempt mixed
+model templates, attention, custom ops, communication, profiling, and metadata
+changes in one patch. This branch instead keeps the DBO chain decomposable into
+small reviewable changes.
 
-## Validation Boundary
+## Custom Operator Boundary
 
-The current tests cover configuration preservation/reset behavior, DBO
-threshold routing, DP coordination calls, forward context state propagation,
-NPU input slicing, and the AllGather MoE handoff call sites.
+Qwen3-MoE and other large MoE models rely on vLLM-Ascend custom operators for
+expert routing and grouped matmul paths. The DBO implementation must therefore
+distinguish two failure classes:
 
-Before claiming performance improvement, the implementation still needs Ascend
-hardware validation for:
+- DBO scheduling failures: threshold, ubatch slicing, stream handoff, or DP
+  coordination bugs.
+- Custom-op availability failures: missing `_C_ascend` registrations,
+  incomplete CANN custom-op packages, or mismatched vLLM/vLLM-Ascend versions.
 
-- multi-card DP/EP MoE execution;
-- HCCL collective ordering under DBO;
-- dispatch/combine overlap with real NPU streams;
-- decode and prefill threshold tuning;
-- graph capture interaction.
+The current branch adds fallback and diagnostics around selected MoE custom-op
+entry points, but the preferred production path is still to build and load the
+custom operators successfully. A successful custom-op environment should pass:
+
+```bash
+find /data/vllm-ascend -name 'vllm_ascend_C*.so' -o -name 'libcust_opapi.so'
+
+python3 - <<'PY'
+from vllm_ascend.utils import enable_custom_op
+import torch
+
+print("enable_custom_op =", enable_custom_op())
+ops = sorted(x for x in torch._C._dispatch_get_all_op_names()
+             if x.startswith("_C_ascend::"))
+print("custom op count =", len(ops))
+print([x for x in ops if "moe" in x.lower()][:50])
+PY
+```
+
+## Validation Matrix
+
+Validated during this work:
+
+- CANN 9.0.0 dynamic libraries can be loaded when the environment is sourced
+  consistently.
+- `torch_npu` 2.10.0 can create and copy NPU tensors on 910B.
+- Single-node two-card HCCL `all_reduce` and `all_to_all_single` pass.
+- vLLM-Ascend plugin loads as `NPUPlatform`.
+- Qwen3-MoE W8A8 configuration is recognized as compressed-tensors INT8
+  weight/activation quantization.
+- The model path progresses far enough to expose the custom-op registration
+  boundary rather than failing at DBO argument parsing.
+
+Still required before a performance claim:
+
+- successful full custom-op build and registration;
+- Qwen3-MoE W8A8 TP=2 + EP worker startup;
+- first-token generation smoke;
+- DBO on/off correctness comparison;
+- multi-card MoE dispatch/combine ordering checks;
+- decode/prefill threshold performance sweep;
+- MC2/Fused MC2 overlap measurements.
+
+## Community Submission Strategy
+
+The implementation is complete enough to be presented as an end-to-end DBO
+feature branch, but it should not be submitted as one large ready-to-merge PR.
+The mergeable route is:
+
+1. DBO config and threshold preservation.
+2. DP coordination and threshold tests.
+3. Ubatch metadata propagation.
+4. Eager NPU ubatch wrapper.
+5. MoE communication handoff.
+6. Custom-op availability diagnostics and fallbacks.
+7. Hardware validation documentation.
+
+This keeps each patch reviewable and avoids repeating the earlier community
+failure mode where a very large DBO PR accumulated unrelated conflicts and
+unverified communication-order risks.
