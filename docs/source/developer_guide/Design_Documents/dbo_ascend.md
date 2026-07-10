@@ -61,7 +61,9 @@ The implementation is intentionally split by responsibility:
   boundary. It still resets manual `ubatch_size` because that is a separate
   manual microbatching feature, not the automatic DBO path. It also guards
   unverified combinations such as PCP/DCP/context parallelism and sequence
-  parallelism.
+  parallelism. Normal MoE runs keep the Ascend default `flashinfer_all2allv`
+  backend, while DBO experiments preserve an explicit DeepEP backend so the
+  upstream DBO all2all requirement can be tested.
 - `vllm_ascend/worker/worker.py`: allocates two workspace slots when DBO is
   enabled. This is deliberately small: workspace allocation follows the config
   decision and does not imply that every batch will be ubatched.

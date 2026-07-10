@@ -618,7 +618,18 @@ class NPUPlatform(Platform):
         if parallel_config and parallel_config.worker_cls == "auto":
             # TODO: this is a tricky way to disable `use_sequence_parallel_moe` in vllm.
             if not vllm_config.compilation_config.pass_config.enable_sp:
-                parallel_config.all2all_backend = "flashinfer_all2allv"
+                requested_all2all_backend = getattr(parallel_config, "all2all_backend", None)
+                deepep_backends = {"deepep_low_latency", "deepep_high_throughput"}
+                if getattr(parallel_config, "enable_dbo", False) and requested_all2all_backend in deepep_backends:
+                    logger.warning(
+                        "[DBO_EXPERIMENTAL] Preserving user-selected DeepEP "
+                        "all2all backend on Ascend. backend=%s. This only "
+                        "unblocks upstream DBO validation; DeepEP kernels still "
+                        "need hardware/runtime support.",
+                        requested_all2all_backend,
+                    )
+                else:
+                    parallel_config.all2all_backend = "flashinfer_all2allv"
             if is_310p():
                 parallel_config.worker_cls = "vllm_ascend._310p.worker_310p.NPUWorker310"
             elif ascend_config.xlite_graph_config.enabled:

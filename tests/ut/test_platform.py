@@ -37,6 +37,7 @@ class TestNPUPlatform(TestBase):
         mock_vllm_config.parallel_config.use_ubatching = False
         mock_vllm_config.parallel_config.num_ubatches = 1
         mock_vllm_config.parallel_config.enable_expert_parallel = False
+        mock_vllm_config.parallel_config.all2all_backend = "allgather_reducescatter"
         mock_vllm_config.parallel_config.prefill_context_parallel_size = 1
         mock_vllm_config.parallel_config.tensor_parallel_size = 1
         mock_vllm_config.parallel_config.pipeline_parallel_size = 1
@@ -898,6 +899,60 @@ class TestNPUPlatform(TestBase):
             vllm_config.parallel_config.worker_cls,
             "vllm_ascend.xlite.xlite_worker.XliteWorker",
         )
+
+    @pytest.mark.parametrize(
+        "requested_backend",
+        ["deepep_low_latency", "deepep_high_throughput"],
+    )
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_preserves_deepep_backend_for_dbo(
+        self,
+        mock_init_recompute,
+        mock_init_ascend,
+        _mock_soc_version,
+        _mock_auto_detect,
+        requested_backend,
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_recompute.return_value = MagicMock()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.worker_cls = "auto"
+        vllm_config.parallel_config.enable_dbo = True
+        vllm_config.parallel_config.enable_expert_parallel = True
+        vllm_config.parallel_config.all2all_backend = requested_backend
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(vllm_config.parallel_config.all2all_backend, requested_backend)
+
+    @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
+    @patch("vllm_ascend.utils.get_ascend_device_type", return_value=AscendDeviceType.A3)
+    @patch("vllm_ascend.ascend_config.init_ascend_config")
+    @patch("vllm_ascend.core.recompute_scheduler.RecomputeSchedulerConfig.initialize_from_config")
+    def test_check_and_update_config_uses_flashinfer_backend_by_default(
+        self,
+        mock_init_recompute,
+        mock_init_ascend,
+        _mock_soc_version,
+        _mock_auto_detect,
+    ):
+        mock_init_ascend.return_value = TestNPUPlatform.mock_vllm_ascend_config()
+        mock_init_recompute.return_value = MagicMock()
+        vllm_config = TestNPUPlatform.mock_vllm_config()
+        vllm_config.parallel_config.worker_cls = "auto"
+
+        from vllm_ascend import platform
+
+        importlib.reload(platform)
+        self.platform.check_and_update_config(vllm_config)
+
+        self.assertEqual(vllm_config.parallel_config.all2all_backend, "flashinfer_all2allv")
 
     @patch("vllm_ascend.quantization.utils.maybe_auto_detect_quantization")
     @patch("vllm_ascend.ascend_config.init_ascend_config")

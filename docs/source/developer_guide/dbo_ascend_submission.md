@@ -67,6 +67,9 @@ Current hardware-dependent boundary:
   `use_ubatching=True num_ubatches=2`, then stops because upstream DBO only
   allows `deepep_low_latency` or `deepep_high_throughput` all2all backends; the
   current Ascend Qwen3-MoE run uses `flashinfer_all2allv`.
+- The platform keeps the default Ascend `flashinfer_all2allv` backend for
+  normal runs, but preserves an explicitly selected DeepEP backend when DBO is
+  enabled so the DeepEP runtime boundary can be tested directly.
 - DBO performance numbers require additional on/off benchmark runs.
 - Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission
   because the available compute resources only covered single-node two-card
@@ -90,6 +93,9 @@ validation evidence:
   registered.
 - The DBO CLI path reaches vLLM's upstream DeepEP backend gate, confirming that
   the Ascend platform no longer disables the DBO parameters before validation.
+- Explicit `--all2all-backend deepep_high_throughput` /
+  `deepep_low_latency` is preserved for DBO experiments instead of being
+  overwritten by the Ascend default backend.
 
 This submission does not claim a final performance result, multi-node
 communication overlap, ACLGraph + DBO capture support, or readiness as a single
@@ -198,6 +204,31 @@ outputs = llm.generate(
 print(outputs[0].outputs[0].text)
 PY
 ```
+
+Run the DBO + DeepEP backend gate smoke:
+
+```bash
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --tensor-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --enable-dbo \
+  --dbo-decode-token-threshold 1 \
+  --dbo-prefill-token-threshold 1 \
+  --all2all-backend deepep_high_throughput \
+  --max-model-len 256 \
+  --max-num-batched-tokens 256 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.90 \
+  --enforce-eager
+```
+
+On the current Ascend environment this command is expected to test whether
+DeepEP runtime kernels are available. A failure after the backend is preserved
+should be recorded as DeepEP / equivalent Ascend all2all support work, not as
+DBO parameter propagation failure.
 
 ## Engineering Findings
 
