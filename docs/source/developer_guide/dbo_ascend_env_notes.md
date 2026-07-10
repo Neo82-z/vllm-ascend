@@ -623,6 +623,33 @@ deepep_high_throughput all2all backend. flashinfer_all2allv is not supported.
 microbatch 校验。阻塞点是 vLLM 当前 DBO 对 DeepEP all2all backend 的硬依赖，
 不是 Ascend DBO 参数保留、threshold 传递或 custom ops 注册失败。
 
+随后本地补丁允许 DBO 场景保留显式 DeepEP backend：
+
+```text
+[DBO_EXPERIMENTAL] Preserving user-selected DeepEP all2all backend on Ascend.
+backend=deepep_high_throughput
+```
+
+使用 `--all2all-backend deepep_high_throughput` 后，Qwen3-30B-A3B W8A8 在
+`tensor_parallel_size=2`、`data_parallel_size=1`、`enable_expert_parallel=True`
+下完成启动：
+
+```text
+[DBO_EXPERIMENTAL] enable_dbo is preserved on Ascend ...
+use_ubatching=True num_ubatches=2
+Disabling cascade attention when DBO is enabled.
+[DBO_EXPERIMENTAL] Wrapped model with NPUUBatchWrapper.
+init engine (profile, create kv cache, warmup model) took 14.07 s
+Starting vLLM server on http://0.0.0.0:8000
+Application startup complete.
+```
+
+这证明 DeepEP backend name 可以穿过 Ascend platform config，且 DBO 启动路径
+可完成 Qwen3-MoE W8A8 server startup。但由于该 run 的
+`data_parallel_size=1`，它还不是严格的 DP=2 DBO rank coordination 或真实
+DeepEP all-to-all 流量验证。后续若继续推进，应使用双卡 `data_parallel_size=2`
+而不是 `tensor_parallel_size=2` 来测试 DBO 的 DP coordination。
+
 ## 分层验证建议
 
 后续继续验证时，不应直接从 vLLM serve 开始，而应按以下顺序：
@@ -684,9 +711,10 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 - Qwen3-MoE W8A8 是当前最合适的双卡 MoE smoke 路径；
 - custom ops 已完成全量编译与注册，Qwen3-MoE W8A8 TP=2 + EP server
   startup 已通过；
-- DBO 参数 smoke 已到达上游 DeepEP backend gate；
+- DBO 参数 smoke 已到达上游 DeepEP backend gate，且在保留
+  `deepep_high_throughput` 后完成 TP=2、DP=1 server startup；
 - 端到端生成和性能 benchmark 的最后关键依赖是 first-token generation、
-  DeepEP/等价 Ascend all2all backend 支持与 DBO on/off 对比；
+  DP=2 DeepEP/等价 Ascend all2all backend 支持与 DBO on/off 对比；
 - vLLM main 与 vLLM-Ascend main 存在多处私有 API 漂移，需要拆成单独 compatibility PR。
 
 建议后续正式拆分：

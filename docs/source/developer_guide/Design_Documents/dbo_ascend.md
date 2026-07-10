@@ -167,6 +167,9 @@ Validated during this work:
   gating, routing, and grouped matmul operators.
 - Qwen3-MoE W8A8 TP=2 + EP server startup passes: both workers load weights,
   KV cache is created, EngineCore warmup completes, and the API server starts.
+- Qwen3-MoE W8A8 with DBO enabled and `deepep_high_throughput` preserved also
+  reaches API server startup in a TP=2, DP=1 configuration. This validates
+  configuration propagation and model wrapping, but not DP=2 coordination.
 
 Still required before a performance claim:
 
@@ -185,6 +188,12 @@ EP startup. The DBO CLI path also reaches vLLM's upstream DeepEP backend gate:
 non-DeepEP all2all backends for microbatching. The branch therefore presents
 the implementation and single-node evidence honestly, while marking DeepEP /
 multi-node overlap as follow-up hardware work.
+
+An additional TP=2, DP=1 startup with `deepep_high_throughput` preserved shows
+that the platform can carry the DeepEP backend selection through to startup.
+The remaining meaningful runtime test is DP=2 + EP on the same two cards, which
+is the smallest configuration that can exercise DBO rank coordination and
+all-to-all behavior.
 
 ## Community Submission Strategy
 

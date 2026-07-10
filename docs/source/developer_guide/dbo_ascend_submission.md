@@ -57,6 +57,11 @@ Verified environment facts:
   `enable_expert_parallel=True`: both TP/EP workers load weights, KV cache is
   created, EngineCore warmup completes, and the OpenAI-compatible API server
   starts on port 8000.
+- With `--enable-dbo`, threshold values set to `1`, and
+  `--all2all-backend deepep_high_throughput`, the same Qwen3 W8A8 TP=2 + EP
+  server also starts successfully. The model is wrapped with
+  `NPUUBatchWrapper`, cascade attention is disabled by vLLM because DBO is
+  enabled, and the API server reaches application startup.
 
 Current hardware-dependent boundary:
 
@@ -70,6 +75,10 @@ Current hardware-dependent boundary:
 - The platform keeps the default Ascend `flashinfer_all2allv` backend for
   normal runs, but preserves an explicitly selected DeepEP backend when DBO is
   enabled so the DeepEP runtime boundary can be tested directly.
+- The successful DeepEP high-throughput startup was run with `tensor_parallel_size=2`
+  and `data_parallel_size=1`. It validates backend preservation, DBO config
+  activation, model wrapping, and startup, but not yet DP=2 rank coordination or
+  true DeepEP all-to-all traffic.
 - DBO performance numbers require additional on/off benchmark runs.
 - Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission
   because the available compute resources only covered single-node two-card
@@ -96,6 +105,8 @@ validation evidence:
 - Explicit `--all2all-backend deepep_high_throughput` /
   `deepep_low_latency` is preserved for DBO experiments instead of being
   overwritten by the Ascend default backend.
+- DeepEP high-throughput startup with DBO enabled reaches API server startup in
+  the TP=2, DP=1 configuration.
 
 This submission does not claim a final performance result, multi-node
 communication overlap, ACLGraph + DBO capture support, or readiness as a single
@@ -226,9 +237,10 @@ vllm serve "$MODEL_DIR" \
 ```
 
 On the current Ascend environment this command is expected to test whether
-DeepEP runtime kernels are available. A failure after the backend is preserved
-should be recorded as DeepEP / equivalent Ascend all2all support work, not as
-DBO parameter propagation failure.
+the DeepEP backend name can be preserved through vLLM-Ascend platform config.
+In the TP=2, DP=1 configuration used during this work, the command reaches API
+server startup. A follow-up DP=2 run is still required to exercise rank
+coordination and real all-to-all traffic.
 
 ## Engineering Findings
 
