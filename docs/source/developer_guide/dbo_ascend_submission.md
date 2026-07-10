@@ -62,6 +62,13 @@ Verified environment facts:
   server also starts successfully. The model is wrapped with
   `NPUUBatchWrapper`, cascade attention is disabled by vLLM because DBO is
   enabled, and the API server reaches application startup.
+- A stricter Qwen3 W8A8 `data_parallel_size=2` + EP + DBO run with
+  `deepep_high_throughput` reaches DP coordinator startup, launches two API
+  servers, initializes HCCL with `world_size=2`, assigns DP ranks 0/1 and EP
+  ranks 0/1, and maps the 128 experts across the two EP ranks. It then stops
+  during MoE layer construction because upstream vLLM references
+  `DeepEPHTPrepareAndFinalize` on the DeepEP high-throughput path even though
+  that symbol is only imported under the CUDA-like platform guard.
 
 Current hardware-dependent boundary:
 
@@ -79,6 +86,11 @@ Current hardware-dependent boundary:
   and `data_parallel_size=1`. It validates backend preservation, DBO config
   activation, model wrapping, and startup, but not yet DP=2 rank coordination or
   true DeepEP all-to-all traffic.
+- The `data_parallel_size=2` run validates that rank coordination can reach
+  distributed worker initialization on the available two-card 910B node. The
+  next blocker is an upstream DeepEP high-throughput prepare/finalize import
+  boundary for non-CUDA-like platforms, not an HCCL startup failure or a DBO
+  threshold/config failure.
 - DBO performance numbers require additional on/off benchmark runs.
 - Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission
   because the available compute resources only covered single-node two-card
@@ -107,6 +119,8 @@ validation evidence:
   overwritten by the Ascend default backend.
 - DeepEP high-throughput startup with DBO enabled reaches API server startup in
   the TP=2, DP=1 configuration.
+- DP=2 + EP + DBO reaches HCCL worker initialization and expert placement, then
+  exposes the upstream DeepEP HT prepare/finalize import boundary on Ascend.
 
 This submission does not claim a final performance result, multi-node
 communication overlap, ACLGraph + DBO capture support, or readiness as a single
@@ -131,7 +145,8 @@ Recommended report structure:
 3. **Validation matrix**: Report each verified layer separately instead of
    claiming one opaque end-to-end number. Include CANN/torch_npu, HCCL
    all-reduce/all-to-all, custom-op registration, Qwen3 W8A8 TP=2 + EP startup,
-   and DBO + DeepEP high-throughput startup.
+   DBO + DeepEP high-throughput startup, and the later DP=2 + EP run that
+   reaches HCCL/expert placement before the DeepEP HT import boundary.
 4. **Resource boundary**: State that the available hardware is single-node
    two-card 910B, not the TP=8 / multi-node environment used by larger
    community experiments. Therefore this submission validates the code path and
@@ -274,8 +289,34 @@ vllm serve "$MODEL_DIR" \
 On the current Ascend environment this command is expected to test whether
 the DeepEP backend name can be preserved through vLLM-Ascend platform config.
 In the TP=2, DP=1 configuration used during this work, the command reaches API
-server startup. A follow-up DP=2 run is still required to exercise rank
-coordination and real all-to-all traffic.
+server startup.
+
+Run the stricter DP=2 boundary smoke:
+
+```bash
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --enable-dbo \
+  --dbo-decode-token-threshold 1 \
+  --dbo-prefill-token-threshold 1 \
+  --all2all-backend deepep_high_throughput \
+  --max-model-len 128 \
+  --max-num-batched-tokens 128 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.70 \
+  --enforce-eager
+```
+
+This run reaches HCCL `world_size=2`, DP ranks 0/1, EP ranks 0/1, and expert
+placement across the two ranks. It stops before weight loading because vLLM
+0.23 imports `DeepEPHTPrepareAndFinalize` only under a CUDA-like platform
+guard, while the DeepEP high-throughput MoE path still references it on Ascend.
+That is the current DeepEP backend boundary to solve before claiming true DBO
+all-to-all overlap.
 
 ## Engineering Findings
 

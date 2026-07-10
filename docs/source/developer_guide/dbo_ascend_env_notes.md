@@ -650,6 +650,64 @@ Application startup complete.
 DeepEP all-to-all 流量验证。后续若继续推进，应使用双卡 `data_parallel_size=2`
 而不是 `tensor_parallel_size=2` 来测试 DBO 的 DP coordination。
 
+### Qwen3-30B-A3B W8A8 + DBO + DP=2 + DeepEP HT
+
+随后执行更严格的双卡 DP/EP smoke：
+
+```bash
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --enable-dbo \
+  --dbo-decode-token-threshold 1 \
+  --dbo-prefill-token-threshold 1 \
+  --all2all-backend deepep_high_throughput \
+  --max-model-len 128 \
+  --max-num-batched-tokens 128 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.70 \
+  --enforce-eager
+```
+
+该 run 已经越过多个关键门槛：
+
+```text
+Defaulting api_server_count to data_parallel_size (2)
+[DBO_EXPERIMENTAL] enable_dbo is preserved on Ascend ...
+use_ubatching=True num_ubatches=2 ... dp_size=2 ep=True
+[DBO_EXPERIMENTAL] Preserving user-selected DeepEP all2all backend on Ascend.
+Started DP Coordinator process
+Started 2 API server processes
+world_size=2 rank=1 ... backend=hccl
+world_size=2 rank=0 ... backend=hccl
+rank 1 ... DP rank 1 ... TP rank 0, EP rank 1
+rank 0 ... DP rank 0 ... TP rank 0, EP rank 0
+[EP Rank 0/2] Expert parallelism is enabled ... Local/global number of experts: 64/128
+[EP Rank 1/2] Expert parallelism is enabled ... Local/global number of experts: 64/128
+```
+
+最终失败点：
+
+```text
+File "/data/vllm/vllm/model_executor/layers/fused_moe/all2all_utils.py", line 88,
+  in maybe_roundup_layer_hidden_size
+    hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(...)
+NameError: name 'DeepEPHTPrepareAndFinalize' is not defined
+```
+
+对应源码中 `DeepEPHTPrepareAndFinalize` 的 import 位于
+`if current_platform.is_cuda_alike():` 分支下。Ascend 平台不是 CUDA-like，
+但 DBO + `deepep_high_throughput` 会让 MoE parallel config 进入
+`use_deepep_ht_kernels` 路径，最终引用了未定义的符号。
+
+因此这次失败应归类为 vLLM DeepEP high-throughput backend 在非 CUDA-like
+平台上的 prepare/finalize import / implementation boundary。它不是 DBO
+参数保留失败，不是 threshold 判定失败，不是 HCCL 初始化失败，也不是
+custom ops 注册失败。
+
 ## 分层验证建议
 
 后续继续验证时，不应直接从 vLLM serve 开始，而应按以下顺序：
@@ -713,6 +771,9 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
   startup 已通过；
 - DBO 参数 smoke 已到达上游 DeepEP backend gate，且在保留
   `deepep_high_throughput` 后完成 TP=2、DP=1 server startup；
+- DP=2 + EP + DBO + `deepep_high_throughput` 已推进到 DP coordinator、
+  双 API server、HCCL `world_size=2`、DP/EP rank assignment 和 expert
+  placement，随后暴露 DeepEP HT prepare/finalize 在 Ascend 上的上游边界；
 - 端到端生成和性能 benchmark 的最后关键依赖是 first-token generation、
   DP=2 DeepEP/等价 Ascend all2all backend 支持与 DBO on/off 对比；
 - vLLM main 与 vLLM-Ascend main 存在多处私有 API 漂移，需要拆成单独 compatibility PR。

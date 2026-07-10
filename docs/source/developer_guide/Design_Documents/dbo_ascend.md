@@ -170,6 +170,11 @@ Validated during this work:
 - Qwen3-MoE W8A8 with DBO enabled and `deepep_high_throughput` preserved also
   reaches API server startup in a TP=2, DP=1 configuration. This validates
   configuration propagation and model wrapping, but not DP=2 coordination.
+- A DP=2 + EP + DBO run with `deepep_high_throughput` reaches the DP
+  coordinator, two API servers, HCCL worker initialization, DP rank assignment,
+  EP rank assignment, and expert placement. It then stops in vLLM's DeepEP
+  high-throughput MoE setup because `DeepEPHTPrepareAndFinalize` is referenced
+  while the import is guarded by `current_platform.is_cuda_alike()`.
 
 Still required before a performance claim:
 
@@ -191,9 +196,10 @@ multi-node overlap as follow-up hardware work.
 
 An additional TP=2, DP=1 startup with `deepep_high_throughput` preserved shows
 that the platform can carry the DeepEP backend selection through to startup.
-The remaining meaningful runtime test is DP=2 + EP on the same two cards, which
-is the smallest configuration that can exercise DBO rank coordination and
-all-to-all behavior.
+A later DP=2 + EP run on the same two cards shows that the system reaches rank
+coordination, HCCL initialization, and expert placement. The remaining runtime
+boundary is the DeepEP high-throughput prepare/finalize implementation on
+Ascend, followed by real all-to-all execution and DBO on/off comparison.
 
 ## Community Submission Strategy
 
