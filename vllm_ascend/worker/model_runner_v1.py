@@ -101,6 +101,7 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
     maybe_create_ubatch_slices,
+    slice_query_start_locs,
 )
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
 
@@ -199,6 +200,143 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+
+def _slice_or_none(value: Any, index: slice) -> Any:
+    return value[index] if value is not None else None
+
+
+def _slice_ascend_attn_metadata(
+    ubatch_slice: Any,
+    attn_metadata: AscendCommonAttentionMetadata,
+) -> AscendCommonAttentionMetadata:
+    """Create an Ascend common attention metadata view for one ubatch.
+
+    Upstream vLLM slices CommonAttentionMetadata before building per-layer
+    metadata. Ascend extends that metadata with NPU-specific fields, so keep
+    those fields in the sliced view rather than falling back to the base class.
+    """
+    assert not ubatch_slice.is_empty(), f"Ubatch slice {ubatch_slice} is empty"
+
+    request_slice = ubatch_slice.request_slice
+    token_slice = ubatch_slice.token_slice
+    start_locs = attn_metadata.query_start_loc_cpu
+
+    first_req = request_slice.start
+    first_tok = token_slice.start
+    last_req = request_slice.stop - 1
+    last_tok = token_slice.stop - 1
+
+    assert start_locs[first_req] <= first_tok < start_locs[first_req + 1], (
+        "Token slice start outside of first request"
+    )
+
+    splits_first_request = first_tok > start_locs[first_req]
+    splits_last_request = last_tok < start_locs[last_req + 1] - 1
+
+    query_start_loc_cpu = slice_query_start_locs(start_locs, request_slice)
+    query_start_loc = slice_query_start_locs(
+        attn_metadata.query_start_loc,
+        request_slice,
+    )
+    assert len(query_start_loc) >= 2, (
+        f"query_start_loc must have at least 2 elements, got {len(query_start_loc)}"
+    )
+
+    if splits_first_request:
+        tokens_skipped = first_tok - start_locs[first_req]
+        query_start_loc[1:] -= tokens_skipped
+        query_start_loc_cpu[1:] -= tokens_skipped
+
+    seq_lens = attn_metadata.seq_lens[request_slice]
+    # Read raw fields to avoid triggering deprecated D2H-syncing properties.
+    seq_lens_cpu = _slice_or_none(attn_metadata._seq_lens_cpu, request_slice)
+    seq_lens_cpu_upper_bound = _slice_or_none(
+        attn_metadata.seq_lens_cpu_upper_bound,
+        request_slice,
+    )
+    num_computed_tokens_cpu = _slice_or_none(
+        attn_metadata._num_computed_tokens_cpu,
+        request_slice,
+    )
+
+    if splits_last_request:
+        tokens_skipped = start_locs[last_req + 1] - token_slice.stop
+        query_start_loc[-1] -= tokens_skipped
+        query_start_loc_cpu[-1] -= tokens_skipped
+
+        seq_lens = seq_lens.clone()
+        seq_lens[-1] -= tokens_skipped
+        if seq_lens_cpu is not None:
+            seq_lens_cpu = seq_lens_cpu.clone()
+            seq_lens_cpu[-1] -= tokens_skipped
+        if seq_lens_cpu_upper_bound is not None:
+            seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound.clone()
+            seq_lens_cpu_upper_bound[-1] -= tokens_skipped
+
+    assert seq_lens_cpu_upper_bound is not None
+    max_seq_len = max(
+        int(seq_lens_cpu_upper_bound.max()),
+        attn_metadata.max_seq_len,
+    )
+    max_query_len = int(
+        torch.max(torch.abs(query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])).item()
+    )
+    if max_query_len == 0:
+        max_query_len = attn_metadata.max_query_len
+
+    num_reqs = request_slice.stop - request_slice.start
+    num_actual_tokens = token_slice.stop - token_slice.start
+    actual_seq_lengths_q = attn_metadata.actual_seq_lengths_q
+    if actual_seq_lengths_q is not None:
+        actual_seq_lengths_q = actual_seq_lengths_q[token_slice]
+
+    return replace(
+        attn_metadata,
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens_cpu,
+        num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=num_reqs,
+        num_actual_tokens=num_actual_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=attn_metadata.block_table_tensor[request_slice],
+        slot_mapping=attn_metadata.slot_mapping[token_slice],
+        slot_mapping_cpu=_slice_or_none(attn_metadata.slot_mapping_cpu, token_slice),
+        actual_seq_lengths_q=actual_seq_lengths_q,
+        positions=_slice_or_none(attn_metadata.positions, token_slice),
+        positions_cpu=_slice_or_none(attn_metadata.positions_cpu, token_slice),
+        num_input_tokens=num_actual_tokens,
+        seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+        _seq_lens_cpu=seq_lens_cpu,
+        _num_computed_tokens_cpu=num_computed_tokens_cpu,
+        dcp_local_seq_lens=_slice_or_none(
+            attn_metadata.dcp_local_seq_lens,
+            request_slice,
+        ),
+        dcp_local_seq_lens_cpu=_slice_or_none(
+            attn_metadata.dcp_local_seq_lens_cpu,
+            request_slice,
+        ),
+        is_prefilling=_slice_or_none(attn_metadata.is_prefilling, request_slice),
+        encoder_seq_lens=_slice_or_none(attn_metadata.encoder_seq_lens, request_slice),
+        encoder_seq_lens_cpu=_slice_or_none(
+            attn_metadata.encoder_seq_lens_cpu,
+            request_slice,
+        ),
+    )
+
+
+def _split_ascend_attn_metadata(
+    ubatch_slices: UBatchSlices,
+    common_attn_metadata: AscendCommonAttentionMetadata,
+) -> list[AscendCommonAttentionMetadata]:
+    return [
+        _slice_ascend_attn_metadata(ubatch_slice, common_attn_metadata)
+        for ubatch_slice in ubatch_slices
+    ]
 
 SEQ_LEN_WITH_MAX_PA_WORKSPACE = 6144
 
@@ -3065,6 +3203,15 @@ class NPUModelRunner(GPUModelRunner):
         """
         if not allow_microbatching:
             return False
+        if num_tokens < self.parallel_config.num_ubatches:
+            if logger.isEnabledFor(logging.DEBUG) and self.parallel_config.enable_dbo:
+                logger.debug(
+                    "[DBO_EXPERIMENTAL] skip ubatching: num_tokens=%s is smaller "
+                    "than num_ubatches=%s",
+                    num_tokens,
+                    self.parallel_config.num_ubatches,
+                )
+            return False
         return check_ubatch_thresholds(
             self.parallel_config,
             num_tokens,
@@ -3502,14 +3649,28 @@ class NPUModelRunner(GPUModelRunner):
                 from vllm_ascend.attention.kvcomp_attn.attention_utils import build_kvcomp_metadata
                 build_kvcomp_metadata(self.kvcomp_meta_data, cm)
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
-                _build_attn_group_metadata(
-                    kv_cache_gid,
-                    attn_gid,
-                    cm,
-                    prefill_ratio_to_sas_metadata,
-                    decode_ratio_to_sas_metadata,
-                    common_ratio_to_sas_metadata,
-                )
+                if ubatch_slices is not None:
+                    for ubid, ubatch_cm in enumerate(
+                        _split_ascend_attn_metadata(ubatch_slices, cm)
+                    ):
+                        _build_attn_group_metadata(
+                            kv_cache_gid,
+                            attn_gid,
+                            ubatch_cm,
+                            prefill_ratio_to_sas_metadata,
+                            decode_ratio_to_sas_metadata,
+                            common_ratio_to_sas_metadata,
+                            ubid,
+                        )
+                else:
+                    _build_attn_group_metadata(
+                        kv_cache_gid,
+                        attn_gid,
+                        cm,
+                        prefill_ratio_to_sas_metadata,
+                        decode_ratio_to_sas_metadata,
+                        common_ratio_to_sas_metadata,
+                    )
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
