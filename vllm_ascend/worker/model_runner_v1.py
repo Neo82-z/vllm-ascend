@@ -20,6 +20,7 @@
 import gc
 import logging
 import math
+import os
 import sys
 import time
 from collections import defaultdict
@@ -200,6 +201,15 @@ torch.npu.config.allow_internal_format = True
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
+
+
+def _dbo_trace_enabled() -> bool:
+    return os.environ.get("VLLM_ASCEND_DBO_TRACE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _slice_or_none(value: Any, index: slice) -> Any:
@@ -2383,6 +2393,19 @@ class NPUModelRunner(GPUModelRunner):
                     num_reqs_padded,
                     self.parallel_config.num_ubatches,
                 )
+                if _dbo_trace_enabled():
+                    logger.warning(
+                        "[DBO_TRACE] split batch: should_ubatch=%s "
+                        "num_scheduled_tokens=%s num_tokens_padded=%s "
+                        "num_reqs_padded=%s ubatch_slices=%s "
+                        "ubatch_slices_padded=%s",
+                        should_ubatch,
+                        num_scheduled_tokens_np.tolist(),
+                        num_tokens_padded,
+                        num_reqs_padded,
+                        ubatch_slices,
+                        ubatch_slices_padded,
+                    )
 
                 if self.dynamic_eplb:
                     self.update_eplb_heat_collection_status(num_tokens_padded)
@@ -3331,6 +3354,27 @@ class NPUModelRunner(GPUModelRunner):
                     cudagraph_mode=cudagraph_mode,
                     should_attempt_ubatching=should_attempt_dbo_ubatching,
                 )
+                if _dbo_trace_enabled():
+                    logger.warning(
+                        "[DBO_TRACE] coordinated batch: should_ubatch=%s "
+                        "should_attempt_ubatching=%s uniform_decode=%s "
+                        "num_tokens_unpadded=%s num_tokens_padded=%s "
+                        "num_tokens_across_dp=%s num_ubatches=%s "
+                        "decode_threshold=%s prefill_threshold=%s dp_size=%s ep=%s",
+                        should_ubatch,
+                        should_attempt_dbo_ubatching,
+                        uniform_decode,
+                        num_tokens,
+                        num_tokens_padded,
+                        (num_tokens_across_dp.tolist()
+                         if num_tokens_across_dp is not None else None),
+                        self.parallel_config.num_ubatches,
+                        self.parallel_config.dbo_decode_token_threshold,
+                        self.parallel_config.dbo_prefill_token_threshold,
+                        self.parallel_config.data_parallel_size,
+                        getattr(self.parallel_config,
+                                "enable_expert_parallel", None),
+                    )
             else:
                 _, num_tokens_across_dp, synced_cudagraph_mode = self._sync_metadata_across_dp(
                     num_tokens=num_tokens_padded,

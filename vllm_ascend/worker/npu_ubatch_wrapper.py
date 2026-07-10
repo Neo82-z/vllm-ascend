@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,6 +22,15 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 from vllm.v1.worker import ubatching as ubatching_state
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
+
+
+def _dbo_trace_enabled() -> bool:
+    return os.environ.get("VLLM_ASCEND_DBO_TRACE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _cat_ubatch_outputs(sorted_results: list[Any]) -> Any:
@@ -444,6 +454,12 @@ class NPUUBatchWrapper:
         ubatch_slices = forward_context.ubatch_slices
         if ubatch_slices is None:
             return self.runnable(**kwargs)
+        if _dbo_trace_enabled():
+            logger.warning(
+                "[DBO_TRACE] NPUUBatchWrapper running %d ubatches: %s",
+                len(ubatch_slices),
+                ubatch_slices,
+            )
         ubatch_metadata = self._make_ubatch_metadata(
             ubatch_slices=ubatch_slices,
             input_ids=kwargs.get("input_ids"),
