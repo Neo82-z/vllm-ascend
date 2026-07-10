@@ -112,6 +112,41 @@ This submission does not claim a final performance result, multi-node
 communication overlap, ACLGraph + DBO capture support, or readiness as a single
 upstream PR.
 
+## Report Narrative
+
+The final competition report should follow the same engineering style as the
+historical community DBO PR
+[`vllm-ascend#4894`](https://github.com/vllm-project/vllm-ascend/pull/4894),
+but with claims scaled to the hardware that was actually available.
+
+Recommended report structure:
+
+1. **Motivation and scope**: Explain that DBO is valuable for MoE serving
+   because it overlaps microbatch compute and communication, but that Ascend
+   needs platform-specific work in scheduling, metadata, NPU streams, MoE
+   communication, custom ops, and version compatibility.
+2. **Major changes**: Present the implementation by layer: platform config,
+   decode/prefill thresholds, DP coordination, ubatch metadata, eager NPU
+   wrapper, MoE handoff, and custom-op diagnostics.
+3. **Validation matrix**: Report each verified layer separately instead of
+   claiming one opaque end-to-end number. Include CANN/torch_npu, HCCL
+   all-reduce/all-to-all, custom-op registration, Qwen3 W8A8 TP=2 + EP startup,
+   and DBO + DeepEP high-throughput startup.
+4. **Resource boundary**: State that the available hardware is single-node
+   two-card 910B, not the TP=8 / multi-node environment used by larger
+   community experiments. Therefore this submission validates the code path and
+   startup behavior, while leaving DP=2/DP>2 communication overlap and
+   throughput curves as follow-up work.
+5. **Evidence over claims**: Use concrete log facts: `enable_custom_op=True`,
+   65 `_C_ascend::` operators registered, `NPUUBatchWrapper` enabled, Qwen3
+   W8A8 API server startup complete, and DBO thresholds preserved.
+6. **Upstream plan**: End with the small-PR sequence from the design document
+   instead of asking reviewers to accept a large monolithic patch.
+
+The key difference from a TP=8 report is the conclusion: this work should be
+presented as a complete DBO implementation and single-node validation package,
+not as a final multi-node performance benchmark.
+
 ## Reproduction Commands
 
 Use one Python and one CANN environment throughout the run:

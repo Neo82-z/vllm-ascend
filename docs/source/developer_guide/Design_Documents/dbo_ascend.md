@@ -199,6 +199,11 @@ all-to-all behavior.
 
 The implementation is complete enough to be presented as an end-to-end DBO
 feature branch, but it should not be submitted as one large ready-to-merge PR.
+This follows the lesson from earlier large community DBO attempts such as
+[`vllm-ascend#4894`](https://github.com/vllm-project/vllm-ascend/pull/4894):
+large benchmark-oriented branches are useful as research evidence, but
+mergeable upstream work should be split by capability and backed by narrow
+tests.
 The mergeable route is:
 
 1. DBO config and threshold preservation.
