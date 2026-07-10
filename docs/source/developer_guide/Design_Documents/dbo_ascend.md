@@ -192,17 +192,33 @@ Validated during this work:
   checkpoint on both workers, attaches `NPUUBatchWrapper`, creates KV cache,
   completes EngineCore warmup, and reports `Application startup complete` on
   both API server processes.
+- Qwen3-MoE W8A8 DP=2 + EP + DBO prefill microbatching completes a real
+  completion request when the experimental MoE handoff is isolated with
+  `VLLM_ASCEND_DISABLE_DBO_MOE_HANDOFF=1`. With
+  `dbo_decode_token_threshold=65536`, `dbo_prefill_token_threshold=128`,
+  `max_model_len=384`, `max_num_batched_tokens=384`, and two 160-token
+  prompts, both DP ranks agree on `should_ubatch=True`, split the prefill into
+  two ubatches, run `NPUUBatchWrapper`, and return HTTP 200. The profiled
+  request reports `prompt_tokens=321`, `completion_tokens=2`, and
+  `system_fingerprint=vllm-0.23.0-dp2-ep-37aedc47`.
+- Torch-NPU profiler collection is available for the same run. The worker
+  profile output is written under the configured `torch_profiler_dir` as
+  per-rank `*_ascend_pt` directories plus API-server `*.pt.trace.json.gz`
+  files. These raw directories require offline `torch_npu.profiler.analyse()`
+  before derived CSV/JSON timeline files such as `kernel_details.csv` or
+  `trace_view.json` are emitted.
 
 Still required before a performance claim:
 
-- first-token generation smoke on the successful DP=2 + EP + DBO native
-  all2all server;
 - DBO on/off correctness comparison;
-- DeepEP or equivalent Ascend all2all backend support for true upstream DBO
-  microbatch execution;
 - multi-card MoE dispatch/combine ordering checks;
 - decode/prefill threshold performance sweep;
 - MC2/Fused MC2 overlap measurements.
+- profiler timeline inspection that shows actual compute/communication overlap;
+- DeepEP or equivalent Ascend all2all backend support for true upstream DBO
+  stream handoff. The current branch verifies the microbatch execution path and
+  provides a switch to isolate the handoff layer, but does not claim final
+  overlap performance.
 
 Multi-node DBO communication overlap is not claimed here. The available
 resources were sufficient for single-node two-card HCCL and Qwen3-MoE TP=2 +

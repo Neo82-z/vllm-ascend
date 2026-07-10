@@ -77,11 +77,26 @@ Verified environment facts:
   wraps both workers with `NPUUBatchWrapper`, creates KV cache, completes engine
   warmup, receives all DP coordinator subscriptions, and reports
   `Application startup complete` on both API servers.
+- A prefill microbatch request has been validated on the same DP=2 + EP
+  Qwen3-MoE W8A8 setup with `VLLM_ASCEND_DISABLE_DBO_MOE_HANDOFF=1` to isolate
+  the remaining stream-handoff layer. With decode threshold disabled
+  (`65536`) and prefill threshold set to `128`, two 160-token prompts trigger
+  `should_ubatch=True` on both DP ranks. The logs show the batch split into
+  `slice(0, 80)` and `slice(80, 160/161)` ubatches and
+  `NPUUBatchWrapper running 2 ubatches` on both workers. The HTTP completion
+  request returns successfully with `prompt_tokens=321`, `completion_tokens=2`,
+  and `system_fingerprint=vllm-0.23.0-dp2-ep-37aedc47`.
+- Torch-NPU profiler raw data is produced under
+  `/data/vllm_profile_dbo_no_handoff_20260710_090442`, including
+  per-worker `*_ascend_pt` directories and API-server `*.pt.trace.json.gz`
+  traces. Derived timeline files require offline
+  `torch_npu.profiler.profiler.analyse()` and should be interpreted as
+  profiler evidence, not as a stable latency benchmark.
 
 Current hardware-dependent boundary:
 
-- First-token generation and DBO on/off behavioral comparison should be run on
-  top of the successful DP=2 + EP + DBO native all2all server startup.
+- DBO on/off behavioral comparison and decode-only threshold testing should be
+  run on top of the successful DP=2 + EP native all2all server.
 - `--enable-dbo --dbo-decode-token-threshold 1 --dbo-prefill-token-threshold 1`
   reaches upstream vLLM microbatch validation with
   `use_ubatching=True num_ubatches=2`, then stops because upstream DBO only
@@ -106,7 +121,12 @@ Current hardware-dependent boundary:
 - The DP=2 native all2all startup run verifies that this bypass is limited to
   vLLM config validation: runtime DBO is still active, shown by
   `NPUUBatchWrapper` being attached to both DP workers.
-- DBO performance numbers require additional on/off benchmark runs.
+- The no-handoff prefill run verifies the scheduling, DP coordination, ubatch
+  slicing, metadata propagation, and NPU ubatch wrapper layers. With handoff
+  enabled, the system reaches runtime but can hang in worker RPC, so the final
+  overlap claim still depends on fixing/validating MoE stream handoff.
+- DBO performance numbers require additional on/off benchmark runs and profiler
+  timeline analysis.
 - Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission
   because the available compute resources only covered single-node two-card
   validation.
@@ -142,6 +162,10 @@ validation evidence:
 - DP=2 + EP + DBO with Ascend-native `flashinfer_all2allv` now reaches API
   server startup with model weights loaded, KV cache created, DP coordinator
   subscriptions complete, and `NPUUBatchWrapper` attached on both workers.
+- DP=2 + EP + DBO prefill microbatching is functionally validated in
+  no-handoff mode: both ranks trigger `should_ubatch=True`, create two ubatch
+  slices, execute `NPUUBatchWrapper`, and return a successful OpenAI-compatible
+  completion response.
 
 This submission does not claim a final performance result, multi-node
 communication overlap, ACLGraph + DBO capture support, or readiness as a single
@@ -166,8 +190,9 @@ Recommended report structure:
 3. **Validation matrix**: Report each verified layer separately instead of
    claiming one opaque end-to-end number. Include CANN/torch_npu, HCCL
    all-reduce/all-to-all, custom-op registration, Qwen3 W8A8 TP=2 + EP startup,
-   DBO + DeepEP high-throughput startup, the DP=2 + EP DeepEP boundary run, and
-   the final DP=2 + EP + DBO native `flashinfer_all2allv` startup.
+   DBO + DeepEP high-throughput startup, the DP=2 + EP DeepEP boundary run, the
+   final DP=2 + EP + DBO native `flashinfer_all2allv` startup, and the DP2/EP
+   prefill microbatch completion request.
 4. **Resource boundary**: State that the available hardware is single-node
    two-card 910B, not the TP=8 / multi-node environment used by larger
    community experiments. Therefore this submission validates the code path and
@@ -175,7 +200,9 @@ Recommended report structure:
    throughput curves as follow-up work.
 5. **Evidence over claims**: Use concrete log facts: `enable_custom_op=True`,
    65 `_C_ascend::` operators registered, `NPUUBatchWrapper` enabled, Qwen3
-   W8A8 API server startup complete, and DBO thresholds preserved.
+   W8A8 API server startup complete, DBO thresholds preserved, and
+   `should_ubatch=True` / `NPUUBatchWrapper running 2 ubatches` for the
+   prefill microbatch request.
 6. **Upstream plan**: End with the small-PR sequence from the design document
    instead of asking reviewers to accept a large monolithic patch.
 
@@ -384,6 +411,156 @@ run is expected during `VllmConfig.__post_init__`. The patch temporarily
 suppresses `ParallelConfig.use_ubatching` only while bypassing vLLM 0.23's
 DeepEP-only assertion. Runtime DBO remains enabled afterward, which is why both
 workers attach `NPUUBatchWrapper`.
+
+Run the verified DBO prefill microbatch request with profiler enabled:
+
+```bash
+export VLLM_ASCEND_DBO_TRACE=1
+export VLLM_ASCEND_DISABLE_DBO_MOE_HANDOFF=1
+export PROF_DIR=/data/vllm_profile_dbo_prefill_$(date +%Y%m%d_%H%M%S)
+
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --enable-dbo \
+  --dbo-decode-token-threshold 65536 \
+  --dbo-prefill-token-threshold 128 \
+  --max-model-len 384 \
+  --max-num-batched-tokens 384 \
+  --max-num-seqs 2 \
+  --gpu-memory-utilization 0.78 \
+  --enforce-eager \
+  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROF_DIR\",\"torch_profiler_with_stack\":false}" \
+  2>&1 | tee /data/qwen3_dp2_ep_dbo_prefill_profile_serve_$(date +%Y%m%d_%H%M%S).log
+```
+
+Then send the profiled request:
+
+```bash
+curl -i -X POST http://127.0.0.1:8000/start_profile
+
+OUT=/data/qwen3_dp2_ep_dbo_prefill_profile_$(date +%Y%m%d_%H%M%S).json
+curl -sS -w "http_code=%{http_code} wall=%{time_total} sec\n" -o "$OUT" \
+  http://127.0.0.1:8000/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d @/data/two_long_prompts_160_payload.json
+
+cat "$OUT"
+curl -i -X POST http://127.0.0.1:8000/stop_profile
+sleep 10
+
+grep -nEi "should_ubatch=True|split batch|NPUUBatchWrapper running|HTTP/1.1 200" \
+  /data/qwen3_dp2_ep_dbo_prefill_profile_serve_*.log | tail -80
+```
+
+Run the matched no-DBO baseline by removing only the DBO flags:
+
+```bash
+unset VLLM_ASCEND_DISABLE_DBO_MOE_HANDOFF
+export PROF_DIR=/data/vllm_profile_baseline_prefill_$(date +%Y%m%d_%H%M%S)
+
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --max-model-len 384 \
+  --max-num-batched-tokens 384 \
+  --max-num-seqs 2 \
+  --gpu-memory-utilization 0.78 \
+  --enforce-eager \
+  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROF_DIR\",\"torch_profiler_with_stack\":false}" \
+  2>&1 | tee /data/qwen3_dp2_ep_baseline_prefill_profile_serve_$(date +%Y%m%d_%H%M%S).log
+```
+
+Use the same request payload and `/start_profile` / `/stop_profile` sequence as
+the DBO run. Keep the comparison conservative: profiler wall time is useful as
+a sanity check, but the important baseline evidence is that the same DP2 + EP
+W8A8 model runs without `should_ubatch=True`.
+
+Run the decode-only DBO check by disabling prefill ubatching and setting the
+decode threshold to one token. Upstream vLLM uses `num_tokens >= threshold`, so
+`--dbo-decode-token-threshold 1` is the intended way to make a one-token decode
+step eligible for ubatching:
+
+```bash
+export VLLM_ASCEND_DBO_TRACE=1
+export VLLM_ASCEND_DISABLE_DBO_MOE_HANDOFF=1
+export PROF_DIR=/data/vllm_profile_dbo_decode_$(date +%Y%m%d_%H%M%S)
+
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --enable-dbo \
+  --dbo-decode-token-threshold 1 \
+  --dbo-prefill-token-threshold 65536 \
+  --max-model-len 384 \
+  --max-num-batched-tokens 384 \
+  --max-num-seqs 2 \
+  --gpu-memory-utilization 0.78 \
+  --enforce-eager \
+  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$PROF_DIR\",\"torch_profiler_with_stack\":false}" \
+  2>&1 | tee /data/qwen3_dp2_ep_dbo_decode_profile_serve_$(date +%Y%m%d_%H%M%S).log
+```
+
+Use a short prompt pair with a larger decode length:
+
+```bash
+cat > /data/two_short_decode_payload.json <<'JSON'
+{
+  "model": "qwen3",
+  "prompt": ["用一句话介绍 vLLM。", "用一句话介绍 MoE。"],
+  "max_tokens": 16,
+  "temperature": 0
+}
+JSON
+
+curl -i -X POST http://127.0.0.1:8000/start_profile
+
+OUT=/data/qwen3_dp2_ep_dbo_decode_profile_$(date +%Y%m%d_%H%M%S).json
+curl -sS -w "http_code=%{http_code} wall=%{time_total} sec\n" -o "$OUT" \
+  http://127.0.0.1:8000/v1/completions \
+  -H 'Content-Type: application/json' \
+  -d @/data/two_short_decode_payload.json
+
+cat "$OUT"
+curl -i -X POST http://127.0.0.1:8000/stop_profile
+sleep 10
+
+grep -nEi "uniform_decode=True|should_ubatch=True|split batch|NPUUBatchWrapper running|HTTP/1.1 200" \
+  /data/qwen3_dp2_ep_dbo_decode_profile_serve_*.log | tail -120
+```
+
+Parse profiler raw output offline:
+
+```bash
+$PY - <<'PY'
+from pathlib import Path
+from torch_npu.profiler.profiler import analyse
+
+for root in ["/data"]:
+    for path in sorted(Path(root).glob("vllm_profile_*")):
+        if path.is_dir():
+            print("analyse", path)
+            analyse(str(path))
+PY
+
+find /data/vllm_profile_* -type f \( \
+  -name "trace_view.json" \
+  -o -name "kernel_details.csv" \
+  -o -name "operator_details.csv" \
+  -o -name "op_statistic.csv" \
+  -o -name "step_trace_time.csv" \
+  -o -name "*.pt.trace.json.gz" \
+\) | sort
+```
 
 ## Engineering Findings
 
