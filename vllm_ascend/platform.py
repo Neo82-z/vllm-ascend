@@ -1217,6 +1217,8 @@ class NPUPlatform(Platform):
                     )
                     vllm_config.parallel_config.enable_dbo = False
                 else:
+                    if getattr(vllm_config, "model_config", None) is not None:
+                        vllm_config.model_config.disable_cascade_attn = True
                     logger.warning(
                         "[DBO_EXPERIMENTAL] enable_dbo is preserved on Ascend "
                         "for the initial scheduling path. This does not claim "

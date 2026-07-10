@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from functools import wraps
+import sys
 
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -27,14 +27,17 @@ _ASCEND_DBO_NATIVE_ALL2ALL_BACKENDS = {
     "flashinfer_nvlink_two_sided",
 }
 
-_original_vllm_config_post_init = VllmConfig.__post_init__
-_original_parallel_config_use_ubatching = ParallelConfig.use_ubatching
+_ORIGINAL_PROPERTY_ATTR = "_vllm_ascend_original_use_ubatching_property"
+_current_use_ubatching = ParallelConfig.use_ubatching
+_original_parallel_config_use_ubatching = getattr(
+    getattr(_current_use_ubatching, "fget", None),
+    _ORIGINAL_PROPERTY_ATTR,
+    _current_use_ubatching,
+)
+_warned_backends: set[str] = set()
 
 
-def _is_ascend_native_dbo_config(config: VllmConfig) -> bool:
-    parallel_config = getattr(config, "parallel_config", None)
-    if parallel_config is None:
-        return False
+def _is_ascend_native_dbo_parallel_config(parallel_config: ParallelConfig) -> bool:
     return (
         getattr(parallel_config, "enable_dbo", False)
         and getattr(parallel_config, "all2all_backend", None)
@@ -42,50 +45,36 @@ def _is_ascend_native_dbo_config(config: VllmConfig) -> bool:
     )
 
 
-@wraps(_original_vllm_config_post_init)
-def _patched_vllm_config_post_init(self: VllmConfig):
-    if not _is_ascend_native_dbo_config(self):
-        return _original_vllm_config_post_init(self)
+def _inside_vllm_config_post_init() -> bool:
+    frame = sys._getframe()
+    while frame is not None:
+        if frame.f_code.co_name == "__post_init__" and frame.f_globals.get("__name__") == "vllm.config.vllm":
+            return True
+        frame = frame.f_back
+    return False
 
-    parallel_config = self.parallel_config
 
-    # Upstream vLLM 0.23 validates DBO microbatching before platform-specific
-    # Ascend MoE communication setup can run, and currently accepts only
-    # DeepEP all2all backends. vLLM-Ascend has its own HCCL/FlashComm/All2All
-    # communication paths, so keep enable_dbo and the native backend intact.
-    # Only suppress the upstream use_ubatching property for this single config
-    # while VllmConfig runs the DeepEP-only assert.
-    def _patched_use_ubatching(config: ParallelConfig) -> bool:
-        if config is parallel_config and _is_ascend_native_dbo_config(self):
-            return False
-        return _original_parallel_config_use_ubatching.fget(config)  # type: ignore[union-attr]
+def _patched_use_ubatching(parallel_config: ParallelConfig) -> bool:
+    if _is_ascend_native_dbo_parallel_config(parallel_config) and _inside_vllm_config_post_init():
+        backend = getattr(parallel_config, "all2all_backend", None)
+        if backend not in _warned_backends:
+            logger.warning(
+                "[DBO_EXPERIMENTAL] Bypassing vLLM's upstream DeepEP-only "
+                "microbatch validation for Ascend native all2all backend. "
+                "backend=%s. Runtime DBO remains enabled after config validation.",
+                backend,
+            )
+            _warned_backends.add(backend)
+        return False
 
+    return _original_parallel_config_use_ubatching.fget(parallel_config)  # type: ignore[union-attr]
+
+
+setattr(
+    _patched_use_ubatching,
+    _ORIGINAL_PROPERTY_ATTR,
+    _original_parallel_config_use_ubatching,
+)
+
+if ParallelConfig.use_ubatching.fget is not _patched_use_ubatching:
     ParallelConfig.use_ubatching = property(_patched_use_ubatching)  # type: ignore[assignment]
-    try:
-        result = _original_vllm_config_post_init(self)
-    finally:
-        ParallelConfig.use_ubatching = _original_parallel_config_use_ubatching  # type: ignore[assignment]
-
-    if not getattr(parallel_config, "enable_dbo", False):
-        return result
-
-    model_config = getattr(self, "model_config", None)
-    if model_config is not None and not getattr(model_config, "disable_cascade_attn", False):
-        model_config.disable_cascade_attn = True
-        logger.warning_once("Disabling cascade attention when Ascend DBO is enabled.")
-
-    logger.warning_once(
-        "[DBO_EXPERIMENTAL] Allowing Ascend native all2all backend for DBO. "
-        "backend=%s use_ubatching=%s num_ubatches=%s. This bypasses vLLM's "
-        "upstream DeepEP-only microbatch validation and must be treated as an "
-        "Ascend-specific PoC until multi-rank MoE communication overlap is "
-        "verified.",
-        parallel_config.all2all_backend,
-        parallel_config.use_ubatching,
-        parallel_config.num_ubatches,
-    )
-    return result
-
-
-if getattr(VllmConfig.__post_init__, "__name__", "") != _patched_vllm_config_post_init.__name__:
-    VllmConfig.__post_init__ = _patched_vllm_config_post_init
