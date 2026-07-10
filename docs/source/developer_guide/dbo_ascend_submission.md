@@ -91,6 +91,10 @@ Current hardware-dependent boundary:
   next blocker is an upstream DeepEP high-throughput prepare/finalize import
   boundary for non-CUDA-like platforms, not an HCCL startup failure or a DBO
   threshold/config failure.
+- The follow-up implementation therefore adds an Ascend-native all2all DBO
+  gate bypass: it lets `flashinfer_all2allv` / `allgather_reducescatter` pass
+  the upstream vLLM 0.23 microbatch assertion without changing the real MoE
+  communication backend to DeepEP.
 - DBO performance numbers require additional on/off benchmark runs.
 - Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission
   because the available compute resources only covered single-node two-card
@@ -121,6 +125,8 @@ validation evidence:
   the TP=2, DP=1 configuration.
 - DP=2 + EP + DBO reaches HCCL worker initialization and expert placement, then
   exposes the upstream DeepEP HT prepare/finalize import boundary on Ascend.
+- The branch contains a narrow `VllmConfig.__post_init__` patch that keeps
+  Ascend-native all2all backends available for the next DP=2 DBO smoke.
 
 This submission does not claim a final performance result, multi-node
 communication overlap, ACLGraph + DBO capture support, or readiness as a single
@@ -317,6 +323,36 @@ placement across the two ranks. It stops before weight loading because vLLM
 guard, while the DeepEP high-throughput MoE path still references it on Ascend.
 That is the current DeepEP backend boundary to solve before claiming true DBO
 all-to-all overlap.
+
+Run the Ascend-native DBO smoke after applying the gate bypass:
+
+```bash
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --enable-dbo \
+  --dbo-decode-token-threshold 1 \
+  --dbo-prefill-token-threshold 1 \
+  --max-model-len 128 \
+  --max-num-batched-tokens 128 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.70 \
+  --enforce-eager
+```
+
+This intentionally omits `--all2all-backend deepep_high_throughput` so Ascend
+uses its native backend. The expected platform log is:
+
+```text
+[DBO_EXPERIMENTAL] Allowing Ascend native all2all backend for DBO.
+```
+
+This is the closest route to the historical vLLM-Ascend DBO approach: keep
+upstream DBO scheduling semantics, but execute communication through Ascend's
+own MoE communication stack rather than CUDA DeepEP.
 
 ## Engineering Findings
 

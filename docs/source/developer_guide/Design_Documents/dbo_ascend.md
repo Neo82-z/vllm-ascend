@@ -62,8 +62,14 @@ The implementation is intentionally split by responsibility:
   manual microbatching feature, not the automatic DBO path. It also guards
   unverified combinations such as PCP/DCP/context parallelism and sequence
   parallelism. Normal MoE runs keep the Ascend default `flashinfer_all2allv`
-  backend, while DBO experiments preserve an explicit DeepEP backend so the
-  upstream DBO all2all requirement can be tested.
+  backend. DBO experiments may either preserve an explicit DeepEP backend to
+  expose the upstream DeepEP boundary, or use an Ascend-native all2all backend
+  through the platform patch described below.
+- `vllm_ascend/patch/platform/patch_dbo_native_all2all.py`: bypasses vLLM
+  0.23's upstream DeepEP-only microbatch assertion for Ascend-native all2all
+  backends. It keeps `enable_dbo` and the real backend intact, temporarily
+  suppresses only the `use_ubatching` property during `VllmConfig` post-init,
+  and restores normal DBO semantics immediately afterward.
 - `vllm_ascend/worker/worker.py`: allocates two workspace slots when DBO is
   enabled. This is deliberately small: workspace allocation follows the config
   decision and does not imply that every batch will be ubatched.
@@ -175,6 +181,10 @@ Validated during this work:
   EP rank assignment, and expert placement. It then stops in vLLM's DeepEP
   high-throughput MoE setup because `DeepEPHTPrepareAndFinalize` is referenced
   while the import is guarded by `current_platform.is_cuda_alike()`.
+- After this DeepEP boundary was identified, the branch adds an Ascend-native
+  DBO gate bypass so the same DP=2 + EP experiment can proceed with the
+  platform default `flashinfer_all2allv` backend instead of requiring the
+  unavailable upstream `deep_ep` package.
 
 Still required before a performance claim:
 
@@ -198,8 +208,8 @@ An additional TP=2, DP=1 startup with `deepep_high_throughput` preserved shows
 that the platform can carry the DeepEP backend selection through to startup.
 A later DP=2 + EP run on the same two cards shows that the system reaches rank
 coordination, HCCL initialization, and expert placement. The remaining runtime
-boundary is the DeepEP high-throughput prepare/finalize implementation on
-Ascend, followed by real all-to-all execution and DBO on/off comparison.
+boundary is now shifted from the upstream DeepEP import gate to executing the
+Ascend-native all2all path under DBO and comparing DBO on/off behavior.
 
 ## Community Submission Strategy
 

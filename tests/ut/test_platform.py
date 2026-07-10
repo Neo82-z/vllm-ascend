@@ -1,4 +1,5 @@
 import importlib
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -760,6 +761,36 @@ class TestNPUPlatform(TestBase):
 
         self.assertTrue(parallel_config.use_ubatching)
         self.assertEqual(parallel_config.num_ubatches, 2)
+
+    def test_dbo_native_all2all_patch_temporarily_bypasses_upstream_gate(self):
+        from vllm_ascend.patch.platform import patch_dbo_native_all2all as native_dbo_patch
+
+        parallel_config = ParallelConfig()
+        parallel_config.enable_dbo = True
+        parallel_config.ubatch_size = 0
+        parallel_config.all2all_backend = "allgather_reducescatter"
+        model_config = SimpleNamespace(disable_cascade_attn=False)
+        vllm_config = SimpleNamespace(parallel_config=parallel_config, model_config=model_config)
+
+        def fake_post_init(config):
+            self.assertTrue(config.parallel_config.enable_dbo)
+            self.assertEqual(config.parallel_config.all2all_backend, "allgather_reducescatter")
+            self.assertFalse(config.parallel_config.use_ubatching)
+            config.parallel_config.all2all_backend = "flashinfer_all2allv"
+            return "post-init-ok"
+
+        original_post_init = native_dbo_patch._original_vllm_config_post_init
+        native_dbo_patch._original_vllm_config_post_init = fake_post_init
+        try:
+            result = native_dbo_patch._patched_vllm_config_post_init(vllm_config)
+        finally:
+            native_dbo_patch._original_vllm_config_post_init = original_post_init
+
+        self.assertEqual(result, "post-init-ok")
+        self.assertTrue(parallel_config.enable_dbo)
+        self.assertTrue(parallel_config.use_ubatching)
+        self.assertEqual(parallel_config.all2all_backend, "flashinfer_all2allv")
+        self.assertTrue(model_config.disable_cascade_attn)
 
     @patch("vllm_ascend.platform.enable_sp", return_value=False)
     def test_fix_incompatible_config_resets_ubatch_size(self, _mock_enable_sp):

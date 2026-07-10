@@ -708,6 +708,62 @@ NameError: name 'DeepEPHTPrepareAndFinalize' is not defined
 参数保留失败，不是 threshold 判定失败，不是 HCCL 初始化失败，也不是
 custom ops 注册失败。
 
+### 转向 Ascend-native all2all DBO
+
+`deep_ep` 在当前 Ascend 环境中不可用：
+
+```text
+is_cuda_alike = False
+has_deep_ep = False
+DeepEPHTPrepareAndFinalize direct import FAIL ModuleNotFoundError("No module named 'deep_ep'")
+```
+
+因此继续安装 CUDA DeepEP 不是最合理路线。参考历史 vLLM-Ascend DBO 工作，
+后续实现转向 Ascend 原生 MoE communication backend：保留 upstream DBO 的
+threshold、DP coordination 和 ubatch slicing，但绕过 vLLM 0.23 中
+DeepEP-only 的 microbatch assert，让 `flashinfer_all2allv` /
+`allgather_reducescatter` 等 Ascend-native backend 继续进入运行时。
+
+新增补丁：
+
+```text
+vllm_ascend/patch/platform/patch_dbo_native_all2all.py
+```
+
+补丁原则：
+
+1. 不修改真实 `all2all_backend`；
+2. 不把 Ascend backend 伪装成 DeepEP；
+3. `enable_dbo` 全程保持为 True，使 Ascend platform 自身的 DBO guard 仍然执行；
+4. 仅在 `VllmConfig.__post_init__` 的上游 assert 阶段临时让
+   `ParallelConfig.use_ubatching` 对当前 config 返回 False；
+5. post-init 结束后恢复正常 `use_ubatching` 语义，并显式禁用 cascade attention。
+
+下一步验证命令应去掉 DeepEP backend 参数：
+
+```bash
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --enable-dbo \
+  --dbo-decode-token-threshold 1 \
+  --dbo-prefill-token-threshold 1 \
+  --max-model-len 128 \
+  --max-num-batched-tokens 128 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.70 \
+  --enforce-eager
+```
+
+预期新增日志：
+
+```text
+[DBO_EXPERIMENTAL] Allowing Ascend native all2all backend for DBO.
+```
+
 ## 分层验证建议
 
 后续继续验证时，不应直接从 vLLM serve 开始，而应按以下顺序：
@@ -774,6 +830,8 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 - DP=2 + EP + DBO + `deepep_high_throughput` 已推进到 DP coordinator、
   双 API server、HCCL `world_size=2`、DP/EP rank assignment 和 expert
   placement，随后暴露 DeepEP HT prepare/finalize 在 Ascend 上的上游边界；
+- 分支已增加 Ascend-native all2all gate bypass，下一步可在不安装
+  `deep_ep` 的前提下用默认 `flashinfer_all2allv` 路径继续 DP=2 DBO smoke；
 - 端到端生成和性能 benchmark 的最后关键依赖是 first-token generation、
   DP=2 DeepEP/等价 Ascend all2all backend 支持与 DBO on/off 对比；
 - vLLM main 与 vLLM-Ascend main 存在多处私有 API 漂移，需要拆成单独 compatibility PR。
