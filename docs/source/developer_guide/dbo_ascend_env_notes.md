@@ -758,11 +758,77 @@ vllm serve "$MODEL_DIR" \
   --enforce-eager
 ```
 
-预期新增日志：
+2026-07-10 实际验证结果：该 Ascend-native 路径已经完成 server startup。
+
+启动命令：
+
+```bash
+vllm serve "$MODEL_DIR" \
+  --served-model-name qwen3 \
+  --trust-remote-code \
+  --data-parallel-size 2 \
+  --enable-expert-parallel \
+  --quantization compressed-tensors \
+  --enable-dbo \
+  --dbo-decode-token-threshold 1 \
+  --dbo-prefill-token-threshold 1 \
+  --max-model-len 128 \
+  --max-num-batched-tokens 128 \
+  --max-num-seqs 1 \
+  --gpu-memory-utilization 0.70 \
+  --enforce-eager
+```
+
+关键日志：
 
 ```text
-[DBO_EXPERIMENTAL] Allowing Ascend native all2all backend for DBO.
+Defaulting api_server_count to data_parallel_size (2)
+Started DP Coordinator process
+Started 2 API server processes
+world_size=2 rank=0 ... backend=hccl
+world_size=2 rank=1 ... backend=hccl
+rank 0 ... DP rank 0 ... TP rank 0, EP rank 0
+rank 1 ... DP rank 1 ... TP rank 0, EP rank 1
+[EP Rank 0/2] Expert parallelism is enabled ... Local/global number of experts: 64/128
+[EP Rank 1/2] Expert parallelism is enabled ... Local/global number of experts: 64/128
+Checkpoint size: 29.07 GiB
+Loading model weights took 15.7760 GB
+[DBO_EXPERIMENTAL] Wrapped model with NPUUBatchWrapper. ACLGraph capture is disabled for ubatched execution.
+Using CPU all reduce to synchronize DP padding between ranks.
+GPU KV cache size: 291,712 tokens
+init engine (profile, create kv cache, warmup model) took 24.51 s
+All engine subscriptions received by DP coordinator
+[DBO_EXPERIMENTAL] Bypassing vLLM's upstream DeepEP-only microbatch validation for Ascend native all2all backend. backend=flashinfer_all2allv.
+Application startup complete.
 ```
+
+该结果比 DeepEP HT 边界 run 更进一步：它不依赖 `deep_ep` 包，也不把 Ascend
+backend 伪装成 DeepEP，而是在默认 `flashinfer_all2allv` 路径下完成
+DP=2 + EP + DBO server startup。
+
+注意：同一段日志中的 `use_ubatching=False` 是 `VllmConfig.__post_init__`
+阶段的临时返回值，用于绕过 vLLM 0.23 上游 DeepEP-only microbatch assert。
+运行时 DBO 仍然恢复为启用状态，证据是两个 worker 都 attach 了
+`NPUUBatchWrapper`。因此该日志不应解释为 DBO 被关闭。
+
+该 run 当前证明：
+
+- DBO 参数与 decode/prefill threshold 能穿过 Ascend platform config；
+- DP=2 coordinator 和双 API server 可以启动；
+- HCCL worker `world_size=2` 初始化成功；
+- EP rank 0/1 和 128 experts 的二分 placement 成功；
+- Qwen3-MoE W8A8 双 worker 权重加载成功；
+- custom ops 与 compressed-tensors W8A8 路径足以完成模型初始化；
+- DBO runtime wrapper 已经挂到两个 worker；
+- KV cache profile、EngineCore warmup 和 API server startup 完成。
+
+该 run 仍未证明：
+
+- first-token generation；
+- DBO on/off 输出一致性；
+- prefill/decode threshold 命中后的真实 ubatch 日志；
+- MoE dispatch/combine overlap 的性能收益；
+- 多节点 HCCL/MC2/Fused MC2 行为。
 
 ## 分层验证建议
 
@@ -830,10 +896,11 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 - DP=2 + EP + DBO + `deepep_high_throughput` 已推进到 DP coordinator、
   双 API server、HCCL `world_size=2`、DP/EP rank assignment 和 expert
   placement，随后暴露 DeepEP HT prepare/finalize 在 Ascend 上的上游边界；
-- 分支已增加 Ascend-native all2all gate bypass，下一步可在不安装
-  `deep_ep` 的前提下用默认 `flashinfer_all2allv` 路径继续 DP=2 DBO smoke；
+- 分支已增加 Ascend-native all2all gate bypass，且已在默认
+  `flashinfer_all2allv` 路径完成 DP=2 + EP + DBO server startup；
 - 端到端生成和性能 benchmark 的最后关键依赖是 first-token generation、
-  DP=2 DeepEP/等价 Ascend all2all backend 支持与 DBO on/off 对比；
+  threshold 命中日志、DP=2 DBO on/off 对比和 MoE communication overlap
+  性能证据；
 - vLLM main 与 vLLM-Ascend main 存在多处私有 API 漂移，需要拆成单独 compatibility PR。
 
 建议后续正式拆分：

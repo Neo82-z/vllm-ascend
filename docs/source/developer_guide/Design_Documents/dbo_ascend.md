@@ -185,10 +185,18 @@ Validated during this work:
   DBO gate bypass so the same DP=2 + EP experiment can proceed with the
   platform default `flashinfer_all2allv` backend instead of requiring the
   unavailable upstream `deep_ep` package.
+- With the Ascend-native `flashinfer_all2allv` backend, Qwen3-MoE W8A8 DP=2 +
+  EP + DBO reaches API server startup. The run starts the DP coordinator and
+  two API servers, initializes HCCL with `world_size=2`, assigns DP ranks 0/1
+  and EP ranks 0/1, maps 64 local experts per EP rank, loads the 29.07 GiB
+  checkpoint on both workers, attaches `NPUUBatchWrapper`, creates KV cache,
+  completes EngineCore warmup, and reports `Application startup complete` on
+  both API server processes.
 
 Still required before a performance claim:
 
-- first-token generation smoke;
+- first-token generation smoke on the successful DP=2 + EP + DBO native
+  all2all server;
 - DBO on/off correctness comparison;
 - DeepEP or equivalent Ascend all2all backend support for true upstream DBO
   microbatch execution;
@@ -208,8 +216,9 @@ An additional TP=2, DP=1 startup with `deepep_high_throughput` preserved shows
 that the platform can carry the DeepEP backend selection through to startup.
 A later DP=2 + EP run on the same two cards shows that the system reaches rank
 coordination, HCCL initialization, and expert placement. The remaining runtime
-boundary is now shifted from the upstream DeepEP import gate to executing the
-Ascend-native all2all path under DBO and comparing DBO on/off behavior.
+boundary has now shifted again: the Ascend-native all2all path reaches server
+startup under DBO, so the next evidence to collect is first-token generation
+and DBO on/off behavior rather than startup viability.
 
 ## Community Submission Strategy
 

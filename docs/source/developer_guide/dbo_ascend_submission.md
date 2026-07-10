@@ -69,11 +69,19 @@ Verified environment facts:
   during MoE layer construction because upstream vLLM references
   `DeepEPHTPrepareAndFinalize` on the DeepEP high-throughput path even though
   that symbol is only imported under the CUDA-like platform guard.
+- After switching back to Ascend-native `flashinfer_all2allv` and applying the
+  narrow microbatch validation bypass, Qwen3 W8A8 DP=2 + EP + DBO reaches API
+  server startup. The run starts the DP coordinator and two API servers,
+  initializes HCCL `world_size=2`, assigns DP/EP ranks 0/1, maps
+  experts across both EP ranks, loads the 29.07 GiB checkpoint on both workers,
+  wraps both workers with `NPUUBatchWrapper`, creates KV cache, completes engine
+  warmup, receives all DP coordinator subscriptions, and reports
+  `Application startup complete` on both API servers.
 
 Current hardware-dependent boundary:
 
 - First-token generation and DBO on/off behavioral comparison should be run on
-  top of the successful Qwen3-MoE server startup.
+  top of the successful DP=2 + EP + DBO native all2all server startup.
 - `--enable-dbo --dbo-decode-token-threshold 1 --dbo-prefill-token-threshold 1`
   reaches upstream vLLM microbatch validation with
   `use_ubatching=True num_ubatches=2`, then stops because upstream DBO only
@@ -95,6 +103,9 @@ Current hardware-dependent boundary:
   gate bypass: it lets `flashinfer_all2allv` / `allgather_reducescatter` pass
   the upstream vLLM 0.23 microbatch assertion without changing the real MoE
   communication backend to DeepEP.
+- The DP=2 native all2all startup run verifies that this bypass is limited to
+  vLLM config validation: runtime DBO is still active, shown by
+  `NPUUBatchWrapper` being attached to both DP workers.
 - DBO performance numbers require additional on/off benchmark runs.
 - Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission
   because the available compute resources only covered single-node two-card
@@ -125,8 +136,12 @@ validation evidence:
   the TP=2, DP=1 configuration.
 - DP=2 + EP + DBO reaches HCCL worker initialization and expert placement, then
   exposes the upstream DeepEP HT prepare/finalize import boundary on Ascend.
-- The branch contains a narrow `VllmConfig.__post_init__` patch that keeps
-  Ascend-native all2all backends available for the next DP=2 DBO smoke.
+- The branch contains a narrow `ParallelConfig.use_ubatching` property patch
+  that keeps Ascend-native all2all backends available during vLLM 0.23 config
+  validation while restoring runtime DBO behavior afterward.
+- DP=2 + EP + DBO with Ascend-native `flashinfer_all2allv` now reaches API
+  server startup with model weights loaded, KV cache created, DP coordinator
+  subscriptions complete, and `NPUUBatchWrapper` attached on both workers.
 
 This submission does not claim a final performance result, multi-node
 communication overlap, ACLGraph + DBO capture support, or readiness as a single
@@ -151,8 +166,8 @@ Recommended report structure:
 3. **Validation matrix**: Report each verified layer separately instead of
    claiming one opaque end-to-end number. Include CANN/torch_npu, HCCL
    all-reduce/all-to-all, custom-op registration, Qwen3 W8A8 TP=2 + EP startup,
-   DBO + DeepEP high-throughput startup, and the later DP=2 + EP run that
-   reaches HCCL/expert placement before the DeepEP HT import boundary.
+   DBO + DeepEP high-throughput startup, the DP=2 + EP DeepEP boundary run, and
+   the final DP=2 + EP + DBO native `flashinfer_all2allv` startup.
 4. **Resource boundary**: State that the available hardware is single-node
    two-card 910B, not the TP=8 / multi-node environment used by larger
    community experiments. Therefore this submission validates the code path and
@@ -344,15 +359,31 @@ vllm serve "$MODEL_DIR" \
 ```
 
 This intentionally omits `--all2all-backend deepep_high_throughput` so Ascend
-uses its native backend. The expected platform log is:
+uses its native backend. The relevant logs from the successful run are:
 
 ```text
-[DBO_EXPERIMENTAL] Allowing Ascend native all2all backend for DBO.
+Defaulting api_server_count to data_parallel_size (2)
+world_size=2 rank=0 ... backend=hccl
+world_size=2 rank=1 ... backend=hccl
+rank 0 ... DP rank 0 ... TP rank 0, EP rank 0
+rank 1 ... DP rank 1 ... TP rank 0, EP rank 1
+[EP Rank 0/2] Expert parallelism is enabled ... Local/global number of experts: 64/128
+[EP Rank 1/2] Expert parallelism is enabled ... Local/global number of experts: 64/128
+[DBO_EXPERIMENTAL] Wrapped model with NPUUBatchWrapper.
+[DBO_EXPERIMENTAL] Bypassing vLLM's upstream DeepEP-only microbatch validation for Ascend native all2all backend. backend=flashinfer_all2allv.
+All engine subscriptions received by DP coordinator
+Application startup complete.
 ```
 
 This is the closest route to the historical vLLM-Ascend DBO approach: keep
 upstream DBO scheduling semantics, but execute communication through Ascend's
 own MoE communication stack rather than CUDA DeepEP.
+
+The `use_ubatching=False` value printed near the platform config log in this
+run is expected during `VllmConfig.__post_init__`. The patch temporarily
+suppresses `ParallelConfig.use_ubatching` only while bypassing vLLM 0.23's
+DeepEP-only assertion. Runtime DBO remains enabled afterward, which is why both
+workers attach `NPUUBatchWrapper`.
 
 ## Engineering Findings
 
