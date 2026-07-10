@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -51,6 +52,15 @@ from vllm_ascend.ops.fused_moe.token_dispatcher import (
 from vllm_ascend.quantization.quant_type import QuantType
 
 _MoECommMethods: dict[MoECommType | None, MoECommMethod] = {}
+
+
+def _disable_dbo_moe_handoff() -> bool:
+    return os.environ.get("VLLM_ASCEND_DISABLE_DBO_MOE_HANDOFF", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def get_moe_comm_method(moe_comm_type: MoECommType | None) -> MoECommMethod | None:
@@ -184,7 +194,11 @@ class MoECommMethod(ABC):
     def _should_use_dbo_stream_handoff(self) -> bool:
         # Only methods with a known communication boundary participate in DBO
         # stream handoff. Unsupported MoE paths keep the normal eager order.
-        return self.supports_dbo_stream_handoff and dbo_enabled()
+        return (
+            self.supports_dbo_stream_handoff
+            and dbo_enabled()
+            and not _disable_dbo_moe_handoff()
+        )
 
     def _token_dispatch_with_optional_dbo_handoff(self, token_dispatch_input):
         use_dbo_handoff = self._should_use_dbo_stream_handoff()
