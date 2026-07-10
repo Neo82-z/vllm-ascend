@@ -207,10 +207,17 @@ Validated during this work:
   files. These raw directories require offline `torch_npu.profiler.analyse()`
   before derived CSV/JSON timeline files such as `kernel_details.csv` or
   `trace_view.json` are emitted.
+- A decode-only DBO threshold run with
+  `dbo_decode_token_threshold=1` and `dbo_prefill_token_threshold=65536`
+  completes successfully and emits profiler data. The observed decode steps do
+  not split into ubatches because each DP rank owns only one decode token, which
+  is below the configured `num_ubatches=2` safety boundary. This is retained as
+  evidence that the decode threshold path is safe on Ascend, while decode
+  overlap still requires a larger concurrent decode batch or a separate
+  profiler run.
 
 Still required before a performance claim:
 
-- DBO on/off correctness comparison;
 - multi-card MoE dispatch/combine ordering checks;
 - decode/prefill threshold performance sweep;
 - MC2/Fused MC2 overlap measurements.

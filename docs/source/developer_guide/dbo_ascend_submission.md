@@ -92,6 +92,14 @@ Verified environment facts:
   traces. Derived timeline files require offline
   `torch_npu.profiler.profiler.analyse()` and should be interpreted as
   profiler evidence, not as a stable latency benchmark.
+- A decode-only DBO configuration was also profiled with
+  `--dbo-decode-token-threshold 1` and
+  `--dbo-prefill-token-threshold 65536`. The short two-prompt request returns
+  HTTP 200 and produces profiler output, but it does not split into ubatches:
+  each DP rank has only one decode token in the step, and the Ascend DBO path
+  intentionally keeps the upstream safety guard `num_tokens >= num_ubatches`.
+  This run is therefore recorded as decode-threshold-path and safety-boundary
+  evidence, not as a decode-overlap result.
 
 Current hardware-dependent boundary:
 
@@ -484,8 +492,12 @@ W8A8 model runs without `should_ubatch=True`.
 
 Run the decode-only DBO check by disabling prefill ubatching and setting the
 decode threshold to one token. Upstream vLLM uses `num_tokens >= threshold`, so
-`--dbo-decode-token-threshold 1` is the intended way to make a one-token decode
-step eligible for ubatching:
+`--dbo-decode-token-threshold 1` is the right way to route one-token decode
+steps into the DBO decision path. In the current DP=2 test, however, each rank
+receives only one decode token per step, while Ascend DBO keeps the safety
+guard `num_tokens >= num_ubatches`. With `num_ubatches=2`, the expected trace is
+`uniform_decode=True` and `should_ubatch=False`; this is a useful negative
+control rather than a decode microbatch split:
 
 ```bash
 export VLLM_ASCEND_DBO_TRACE=1
@@ -534,7 +546,7 @@ cat "$OUT"
 curl -i -X POST http://127.0.0.1:8000/stop_profile
 sleep 10
 
-grep -nEi "uniform_decode=True|should_ubatch=True|split batch|NPUUBatchWrapper running|HTTP/1.1 200" \
+grep -nEi "uniform_decode=True|num_tokens_unpadded=1|num_ubatches=2|should_ubatch|split batch|NPUUBatchWrapper running|HTTP/1.1 200" \
   /data/qwen3_dp2_ep_dbo_decode_profile_serve_*.log | tail -120
 ```
 
