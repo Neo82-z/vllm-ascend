@@ -62,6 +62,11 @@ Current hardware-dependent boundary:
 
 - First-token generation and DBO on/off behavioral comparison should be run on
   top of the successful Qwen3-MoE server startup.
+- `--enable-dbo --dbo-decode-token-threshold 1 --dbo-prefill-token-threshold 1`
+  reaches upstream vLLM microbatch validation with
+  `use_ubatching=True num_ubatches=2`, then stops because upstream DBO only
+  allows `deepep_low_latency` or `deepep_high_throughput` all2all backends; the
+  current Ascend Qwen3-MoE run uses `flashinfer_all2allv`.
 - DBO performance numbers require additional on/off benchmark runs.
 - Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission
   because the available compute resources only covered single-node two-card
@@ -83,6 +88,8 @@ validation evidence:
   unverified MoE communication variants remain guarded.
 - Qwen3-30B-A3B W8A8 TP=2 + EP reaches API server startup with custom ops
   registered.
+- The DBO CLI path reaches vLLM's upstream DeepEP backend gate, confirming that
+  the Ascend platform no longer disables the DBO parameters before validation.
 
 This submission does not claim a final performance result, multi-node
 communication overlap, ACLGraph + DBO capture support, or readiness as a single

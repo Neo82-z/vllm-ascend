@@ -595,6 +595,34 @@ Application startup complete.
 KV cache profile、EngineCore warmup 和 API server startup。后续验证应继续
 做 first-token generation 与 DBO on/off 参数路径对比。
 
+同日开启 DBO 参数：
+
+```text
+--enable-dbo
+--dbo-decode-token-threshold 1
+--dbo-prefill-token-threshold 1
+```
+
+平台层输出：
+
+```text
+[DBO_EXPERIMENTAL] enable_dbo is preserved on Ascend ...
+use_ubatching=True num_ubatches=2
+dbo_decode_token_threshold=1 dbo_prefill_token_threshold=1
+dp_size=1 ep=True
+```
+
+随后上游 vLLM `VllmConfig` 在 microbatch 校验阶段停止：
+
+```text
+Microbatching currently only supports the deepep_low_latency and
+deepep_high_throughput all2all backend. flashinfer_all2allv is not supported.
+```
+
+该结果说明 DBO 参数已经穿过 Ascend platform config，并触发上游 DBO
+microbatch 校验。阻塞点是 vLLM 当前 DBO 对 DeepEP all2all backend 的硬依赖，
+不是 Ascend DBO 参数保留、threshold 传递或 custom ops 注册失败。
+
 ## 分层验证建议
 
 后续继续验证时，不应直接从 vLLM serve 开始，而应按以下顺序：
@@ -656,8 +684,9 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 - Qwen3-MoE W8A8 是当前最合适的双卡 MoE smoke 路径；
 - custom ops 已完成全量编译与注册，Qwen3-MoE W8A8 TP=2 + EP server
   startup 已通过；
-- 端到端生成和性能 benchmark 的最后关键依赖是 first-token generation 与
-  DBO on/off 对比；
+- DBO 参数 smoke 已到达上游 DeepEP backend gate；
+- 端到端生成和性能 benchmark 的最后关键依赖是 first-token generation、
+  DeepEP/等价 Ascend all2all backend 支持与 DBO on/off 对比；
 - vLLM main 与 vLLM-Ascend main 存在多处私有 API 漂移，需要拆成单独 compatibility PR。
 
 建议后续正式拆分：

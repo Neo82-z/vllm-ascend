@@ -170,15 +170,19 @@ Still required before a performance claim:
 
 - first-token generation smoke;
 - DBO on/off correctness comparison;
+- DeepEP or equivalent Ascend all2all backend support for true upstream DBO
+  microbatch execution;
 - multi-card MoE dispatch/combine ordering checks;
 - decode/prefill threshold performance sweep;
 - MC2/Fused MC2 overlap measurements.
 
 Multi-node DBO communication overlap is not claimed here. The available
 resources were sufficient for single-node two-card HCCL and Qwen3-MoE TP=2 +
-EP startup, but not for multi-node MC2/Fused MC2 ordering and performance
-validation. The branch therefore presents the implementation and single-node
-evidence honestly, while marking multi-node overlap as follow-up hardware work.
+EP startup. The DBO CLI path also reaches vLLM's upstream DeepEP backend gate:
+`enable_dbo=True` produces `use_ubatching=True`, but vLLM currently rejects
+non-DeepEP all2all backends for microbatching. The branch therefore presents
+the implementation and single-node evidence honestly, while marking DeepEP /
+multi-node overlap as follow-up hardware work.
 
 ## Community Submission Strategy
 
