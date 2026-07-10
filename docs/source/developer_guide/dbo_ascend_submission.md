@@ -47,14 +47,22 @@ Verified environment facts:
 - `torch.ones(..., device="npu")`, elementwise add, and CPU copy pass.
 - Single-node two-card HCCL `all_reduce` and `all_to_all_single` pass.
 - `VLLM_PLUGINS=ascend` activates `vllm_ascend.platform.NPUPlatform`.
+- vLLM-Ascend custom ops build and register successfully after adding the
+  package directory to `LD_LIBRARY_PATH`: `enable_custom_op=True`, 65
+  `_C_ascend::` ops are visible, including `moe_gating_top_k`,
+  `moe_grouped_matmul`, and `npu_moe_init_routing_custom`.
 - Qwen3-30B-A3B W8A8 is detected as `compressed-tensors` INT8 W8A8
-  quantization and reaches the custom-op-dependent MoE path.
+  quantization.
+- Qwen3-30B-A3B W8A8 starts with `tensor_parallel_size=2` and
+  `enable_expert_parallel=True`: both TP/EP workers load weights, KV cache is
+  created, EngineCore warmup completes, and the OpenAI-compatible API server
+  starts on port 8000.
 
 Current hardware-dependent boundary:
 
-- Full Qwen3-MoE generation depends on successful vLLM-Ascend custom-op build
-  and registration.
-- DBO performance numbers require the model to pass custom-op startup first.
+- First-token generation and DBO on/off behavioral comparison should be run on
+  top of the successful Qwen3-MoE server startup.
+- DBO performance numbers require additional on/off benchmark runs.
 - Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission.
 
 ## Reproduction Commands

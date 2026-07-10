@@ -568,6 +568,33 @@ enforce_eager=True
 该模型已经推进到 Qwen3-MoE / W8A8 / custom-op 相关路径。若后续仍失败，优先
 检查 `_C_ascend` custom ops 是否完成注册，而不是回到旧模型兼容问题上。
 
+2026-07-10 验证结果：
+
+```text
+enable_custom_op = True
+custom op count = 65
+moe ops include:
+_C_ascend::moe_gating_top_k
+_C_ascend::moe_gating_top_k_hash
+_C_ascend::moe_grouped_matmul
+_C_ascend::npu_moe_init_routing_custom
+```
+
+Qwen3-30B-A3B W8A8 在双卡 910B 上完成 TP=2 + EP 启动：
+
+```text
+Worker_TP0_EP0: Loading model weights took 14.7736 GB
+Worker_TP1_EP1: Loading model weights took 14.7736 GB
+GPU KV cache size: 865,280 tokens
+init engine (profile, create kv cache, warmup model) took 18.70 s
+Starting vLLM server on http://0.0.0.0:8000
+Application startup complete.
+```
+
+这说明当前环境已经越过 custom ops 注册、Qwen3-MoE W8A8 权重加载、
+KV cache profile、EngineCore warmup 和 API server startup。后续验证应继续
+做 first-token generation 与 DBO on/off 参数路径对比。
+
 ## 分层验证建议
 
 后续继续验证时，不应直接从 vLLM serve 开始，而应按以下顺序：
@@ -627,7 +654,10 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 - 单节点双卡 HCCL 已验证；
 - CANN 9.0.0 + torch_npu 2.10.0 在正确安装和环境变量配置后可运行基础 NPU 算子；
 - Qwen3-MoE W8A8 是当前最合适的双卡 MoE smoke 路径；
-- 端到端生成和性能 benchmark 的最后关键依赖是 custom ops 全量编译与注册；
+- custom ops 已完成全量编译与注册，Qwen3-MoE W8A8 TP=2 + EP server
+  startup 已通过；
+- 端到端生成和性能 benchmark 的最后关键依赖是 first-token generation 与
+  DBO on/off 对比；
 - vLLM main 与 vLLM-Ascend main 存在多处私有 API 漂移，需要拆成单独 compatibility PR。
 
 建议后续正式拆分：

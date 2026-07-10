@@ -121,13 +121,14 @@ Validated during this work:
 - vLLM-Ascend plugin loads as `NPUPlatform`.
 - Qwen3-MoE W8A8 configuration is recognized as compressed-tensors INT8
   weight/activation quantization.
-- The model path progresses far enough to expose the custom-op registration
-  boundary rather than failing at DBO argument parsing.
+- vLLM-Ascend custom ops build and register successfully:
+  `enable_custom_op=True`, 65 `_C_ascend::` ops are visible, including the MoE
+  gating, routing, and grouped matmul operators.
+- Qwen3-MoE W8A8 TP=2 + EP server startup passes: both workers load weights,
+  KV cache is created, EngineCore warmup completes, and the API server starts.
 
 Still required before a performance claim:
 
-- successful full custom-op build and registration;
-- Qwen3-MoE W8A8 TP=2 + EP worker startup;
 - first-token generation smoke;
 - DBO on/off correctness comparison;
 - multi-card MoE dispatch/combine ordering checks;
