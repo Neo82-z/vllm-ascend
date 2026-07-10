@@ -23,6 +23,11 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.worker import ubatching as ubatching_state
 from vllm.v1.worker.ubatch_utils import UBatchSlice, UBatchSlices
 
+from vllm_ascend.ascend_forward_context import _ExtraForwardContextProxy
+
+
+_ASCEND_EXTRA_FORWARD_CONTEXT_ATTRS = _ExtraForwardContextProxy.extra_attrs
+
 
 def _dbo_trace_enabled() -> bool:
     return os.environ.get("VLLM_ASCEND_DBO_TRACE", "").strip().lower() in {
@@ -57,6 +62,86 @@ def _patch_upstream_ubatching_for_npu() -> None:
         return func(*args, **kwargs)
 
     ubatching_state.dbo_get_previous_event = npu_dbo_get_previous_event
+
+
+def _get_context_extra_attr(context: ForwardContext, name: str) -> Any:
+    additional_kwargs = getattr(context, "additional_kwargs", {})
+    if name in additional_kwargs:
+        return additional_kwargs[name]
+    return getattr(context, name, None)
+
+
+def _set_context_extra_attr(context: ForwardContext, name: str, value: Any) -> None:
+    # v1 reads these values as direct attributes, while v2 reads them from
+    # additional_kwargs. Populate both locations so the same ubatch context is
+    # usable across runner generations.
+    setattr(context, name, value)
+    additional_kwargs = getattr(context, "additional_kwargs", None)
+    if additional_kwargs is not None:
+        additional_kwargs[name] = value
+
+
+def _copy_ascend_extra_forward_context(
+    parent_context: ForwardContext,
+    child_context: ForwardContext,
+    ubatch_slice: UBatchSlice,
+    ubatch_num_tokens_across_dp: torch.Tensor | None,
+    tensor_parallel_size: int,
+) -> None:
+    for name in _ASCEND_EXTRA_FORWARD_CONTEXT_ATTRS:
+        _set_context_extra_attr(
+            child_context,
+            name,
+            _get_context_extra_attr(parent_context, name),
+        )
+
+    max_tokens_across_dp = (
+        int(ubatch_num_tokens_across_dp.max().item())
+        if ubatch_num_tokens_across_dp is not None
+        else ubatch_slice.num_tokens
+    )
+    padded_num_tokens = (
+        (max_tokens_across_dp + tensor_parallel_size - 1)
+        // tensor_parallel_size
+        * tensor_parallel_size
+    )
+
+    _set_context_extra_attr(child_context, "num_tokens", ubatch_slice.num_tokens)
+    _set_context_extra_attr(
+        child_context,
+        "num_tokens_across_dp",
+        ubatch_num_tokens_across_dp,
+    )
+    _set_context_extra_attr(
+        child_context,
+        "max_tokens_across_dp",
+        max_tokens_across_dp,
+    )
+    _set_context_extra_attr(child_context, "padded_num_tokens", padded_num_tokens)
+
+    parent_mc2_mask = _get_context_extra_attr(parent_context, "mc2_mask")
+    if parent_mc2_mask is not None:
+        mc2_mask = torch.zeros(
+            padded_num_tokens,
+            dtype=parent_mc2_mask.dtype,
+            device=parent_mc2_mask.device,
+        )
+        mc2_mask[: ubatch_slice.num_tokens] = True
+        _set_context_extra_attr(child_context, "mc2_mask", mc2_mask)
+
+    flash_comm_enabled = bool(
+        _get_context_extra_attr(child_context, "flash_comm_v1_enabled")
+        or _get_context_extra_attr(child_context, "flashcomm_v2_enabled")
+    )
+    if flash_comm_enabled:
+        _set_context_extra_attr(child_context, "padded_length", padded_num_tokens)
+        _set_context_extra_attr(
+            child_context,
+            "pad_size",
+            padded_num_tokens - ubatch_slice.num_tokens,
+        )
+    else:
+        _set_context_extra_attr(child_context, "pad_size", 0)
 
 
 @dataclass
@@ -328,12 +413,14 @@ class NPUUBatchWrapper:
         attn_metadata = forward_context.attn_metadata
         slot_mapping = forward_context.slot_mapping
         contexts = []
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         for i, ubatch_slice in enumerate(ubatch_slices):
             ubatch_attn_metadata = (
                 attn_metadata[i] if isinstance(attn_metadata, list) else attn_metadata
             )
             ubatch_slot_mapping = self._slice_slot_mapping(slot_mapping, ubatch_slice, i)
             dp_metadata = None
+            ubatch_num_tokens_across_dp = None
             if self.vllm_config.parallel_config.data_parallel_size > 1:
                 ubatch_num_tokens_across_dp = torch.tensor(
                     [ubatch_slice.num_tokens]
@@ -346,19 +433,25 @@ class NPUUBatchWrapper:
                     ubatch_slice.num_tokens,
                     ubatch_num_tokens_across_dp,
                 )
-            contexts.append(
-                create_forward_context(
-                    attn_metadata=ubatch_attn_metadata,
-                    vllm_config=self.vllm_config,
-                    dp_metadata=dp_metadata,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                    batch_descriptor=BatchDescriptor(ubatch_slice.num_tokens),
-                    ubatch_slices=None,
-                    slot_mapping=ubatch_slot_mapping,
-                    additional_kwargs=forward_context.additional_kwargs,
-                    skip_compiled=forward_context.skip_compiled,
-                )
+            ubatch_context = create_forward_context(
+                attn_metadata=ubatch_attn_metadata,
+                vllm_config=self.vllm_config,
+                dp_metadata=dp_metadata,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                batch_descriptor=BatchDescriptor(ubatch_slice.num_tokens),
+                ubatch_slices=None,
+                slot_mapping=ubatch_slot_mapping,
+                additional_kwargs=dict(forward_context.additional_kwargs),
+                skip_compiled=forward_context.skip_compiled,
             )
+            _copy_ascend_extra_forward_context(
+                parent_context=forward_context,
+                child_context=ubatch_context,
+                ubatch_slice=ubatch_slice,
+                ubatch_num_tokens_across_dp=ubatch_num_tokens_across_dp,
+                tensor_parallel_size=tp_size,
+            )
+            contexts.append(ubatch_context)
         return contexts
 
     def _make_ubatch_metadata(
@@ -417,6 +510,10 @@ class NPUUBatchWrapper:
                     positions=metadata.positions,
                     inputs_embeds=metadata.inputs_embeds,
                     intermediate_tensors=metadata.intermediate_tensors,
+                )
+                metadata.context.forward_context.input_ids = metadata.input_ids
+                metadata.context.forward_context.additional_kwargs["input_ids"] = (
+                    metadata.input_ids
                 )
                 with metadata.context, override_forward_context(
                     metadata.context.forward_context
