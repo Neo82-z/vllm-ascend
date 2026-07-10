@@ -3055,6 +3055,14 @@ class NPUModelRunner(GPUModelRunner):
         uniform_decode: bool,
         allow_microbatching: bool,
     ) -> bool:
+        """Return the local DBO eligibility before DP-rank coordination.
+
+        vLLM's DBO thresholds are mode-specific: uniform decode batches use
+        `dbo_decode_token_threshold`, while prefill / mixed batches use
+        `dbo_prefill_token_threshold`. This local result is only an eligibility
+        signal; `_coordinate_dbo_batch_across_dp` decides whether all DP ranks
+        will actually enter the ubatch path.
+        """
         if not allow_microbatching:
             return False
         return check_ubatch_thresholds(
@@ -3072,6 +3080,7 @@ class NPUModelRunner(GPUModelRunner):
         cudagraph_mode: CUDAGraphMode,
         should_attempt_ubatching: bool,
     ) -> tuple[bool, torch.Tensor | None, CUDAGraphMode]:
+        """Synchronize the DBO decision before any rank enters collectives."""
         should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.parallel_config,

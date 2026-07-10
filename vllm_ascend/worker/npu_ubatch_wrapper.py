@@ -217,6 +217,13 @@ def make_npu_ubatch_contexts(
 
 
 class NPUUBatchWrapper:
+    """Minimal eager-mode ubatch runner for Ascend DBO.
+
+    The wrapper keeps the upstream DBO contract but replaces CUDA stream/event
+    handling with NPU streams. It intentionally avoids ACLGraph capture for now:
+    correctness and communication ordering are validated in eager mode first.
+    """
+
     def __init__(
         self,
         runnable: Callable,
@@ -416,6 +423,9 @@ class NPUUBatchWrapper:
         for thread in ubatch_threads:
             thread.start()
 
+        # All ubatch threads first publish their context, then ubatch 0 starts
+        # the ping-pong sequence. DBO stream handoff inside MoE advances the
+        # compute/communication order between ubatches.
         self.ready_barrier.wait()
         ubatch_metadata[0].context.cpu_wait_event.set()
         for thread in ubatch_threads:

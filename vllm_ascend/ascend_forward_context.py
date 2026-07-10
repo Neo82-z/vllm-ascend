@@ -78,7 +78,10 @@ def set_ascend_forward_context(
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
-    We add some additional param into forward_context.
+
+    Ascend DBO extends the normal forward context with `ubatch_slices` and
+    `slot_mapping`, allowing attention metadata, model runner input slicing,
+    and MoE communication handoff to observe the same ubatch decision.
     """
     forward_context_kwargs = {
         "attn_metadata": attn_metadata,

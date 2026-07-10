@@ -52,6 +52,45 @@ The important invariant is that all ranks either execute the normal batch path
 or the same ubatch path. A local threshold decision is not allowed to skip a
 collective independently of other ranks.
 
+## Code Walkthrough
+
+The implementation is intentionally split by responsibility:
+
+- `vllm_ascend/platform.py`: keeps `enable_dbo` and upstream DBO thresholds on
+  Ascend when the requested configuration is within the current validation
+  boundary. It still resets manual `ubatch_size` because that is a separate
+  manual microbatching feature, not the automatic DBO path. It also guards
+  unverified combinations such as PCP/DCP/context parallelism and sequence
+  parallelism.
+- `vllm_ascend/worker/worker.py`: allocates two workspace slots when DBO is
+  enabled. This is deliberately small: workspace allocation follows the config
+  decision and does not imply that every batch will be ubatched.
+- `vllm_ascend/worker/model_runner_v1.py`: owns the runtime DBO decision. It
+  first calls upstream `check_ubatch_thresholds` to decide local eligibility
+  from decode/prefill thresholds, then calls `coordinate_batch_across_dp` so all
+  DP ranks agree before any collective can run. If the synchronized decision is
+  true, it uses `maybe_create_ubatch_slices` and forwards those slices through
+  Ascend forward context.
+- `vllm_ascend/ascend_forward_context.py`: stores `ubatch_slices` and
+  `slot_mapping` in the forward context so attention metadata, model input
+  slicing, and MoE communication observe the same batch split.
+- `vllm_ascend/worker/npu_ubatch_wrapper.py`: runs the eager NPU ubatch path. It
+  slices `input_ids`, `positions`, embeddings, intermediate tensors, attention
+  metadata, and slot mapping per ubatch, then executes the wrapped model with
+  NPU streams and DBO event handoff. ACLGraph capture is intentionally excluded
+  from this first correctness path.
+- `vllm_ascend/ops/fused_moe/moe_comm_method.py`: adds the first MoE
+  communication handoff boundary. Supported methods yield from compute to
+  communication before dispatch/combine and switch back to compute afterward.
+  Unsupported communication methods keep eager ordering rather than pretending
+  to overlap safely.
+- `tests/ut/...`: covers parameter preservation, threshold routing, DP
+  coordination, forward-context ubatch state, worker workspace allocation, NPU
+  input slicing, and MoE stream handoff hooks.
+
+This file-level split is the main difference from the historical all-in-one
+DBO attempt: each layer can become a small upstream PR with its own tests.
+
 ## Supported and Guarded Paths
 
 Supported in the current branch:
@@ -134,6 +173,12 @@ Still required before a performance claim:
 - multi-card MoE dispatch/combine ordering checks;
 - decode/prefill threshold performance sweep;
 - MC2/Fused MC2 overlap measurements.
+
+Multi-node DBO communication overlap is not claimed here. The available
+resources were sufficient for single-node two-card HCCL and Qwen3-MoE TP=2 +
+EP startup, but not for multi-node MC2/Fused MC2 ordering and performance
+validation. The branch therefore presents the implementation and single-node
+evidence honestly, while marking multi-node overlap as follow-up hardware work.
 
 ## Community Submission Strategy
 

@@ -182,6 +182,8 @@ class MoECommMethod(ABC):
         return unified_apply_mlp(mlp_compute_input=mlp_compute_input)
 
     def _should_use_dbo_stream_handoff(self) -> bool:
+        # Only methods with a known communication boundary participate in DBO
+        # stream handoff. Unsupported MoE paths keep the normal eager order.
         return self.supports_dbo_stream_handoff and dbo_enabled()
 
     def _token_dispatch_with_optional_dbo_handoff(self, token_dispatch_input):

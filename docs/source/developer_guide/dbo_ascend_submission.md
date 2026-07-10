@@ -63,7 +63,30 @@ Current hardware-dependent boundary:
 - First-token generation and DBO on/off behavioral comparison should be run on
   top of the successful Qwen3-MoE server startup.
 - DBO performance numbers require additional on/off benchmark runs.
-- Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission.
+- Multi-node HCCL/MC2/Fused MC2 overlap is not claimed in this submission
+  because the available compute resources only covered single-node two-card
+  validation.
+
+## What This Submission Claims
+
+This submission claims a complete Ascend DBO code path and single-node
+validation evidence:
+
+- DBO parameters are preserved and validated through Ascend platform config.
+- Decode and prefill thresholds feed the same upstream DBO decision helper used
+  by vLLM.
+- DP coordination is called before creating ubatch slices, preventing
+  rank-local threshold decisions from changing collective order.
+- Ubatch metadata is carried through Ascend forward context and consumed by an
+  eager NPU ubatch wrapper.
+- The first MoE communication boundary has DBO stream handoff hooks, while
+  unverified MoE communication variants remain guarded.
+- Qwen3-30B-A3B W8A8 TP=2 + EP reaches API server startup with custom ops
+  registered.
+
+This submission does not claim a final performance result, multi-node
+communication overlap, ACLGraph + DBO capture support, or readiness as a single
+upstream PR.
 
 ## Reproduction Commands
 
